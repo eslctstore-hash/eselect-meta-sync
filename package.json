@@ -1,10 +1,4 @@
 {
-
-"scripts": {
-  "start": "node server.js"
-}
-
-
   
   "name": "eselect-meta-sync",
   "version": "1.0.0",
