@@ -6,9 +6,9 @@ require("dotenv").config();
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
-const { META_ACCESS_TOKEN, META_PAGE_ID, META_IG_ID, OPENAI_API_KEY, SHOPIFY_SECRET } = process.env;
+const { META_ACCESS_TOKEN, META_IG_ID, OPENAI_API_KEY, SHOPIFY_SECRET } = process.env;
 
-// ========== VERIFY SHOPIFY WEBHOOK ==========
+// ====== VERIFY SHOPIFY WEBHOOK ======
 function verifyShopify(req) {
   const hmacHeader = req.headers["x-shopify-hmac-sha256"];
   const body = JSON.stringify(req.body);
@@ -19,16 +19,15 @@ function verifyShopify(req) {
   return hmacHeader === hash;
 }
 
-// ========== GENERATE CAPTION & HASHTAGS ==========
+// ====== GENERATE CAPTION & HASHTAGS (GPT-4o) ======
 async function generateCaption(product) {
   const prompt = `
-Generate a bilingual Instagram caption (Arabic + English) for this product:
-Name: ${product.title}
-Description: ${product.body_html}
-Create also 10 hashtags in Arabic and English related to it.
-Return as:
-Caption: ...
-Hashtags: ...
+  Create a bilingual (Arabic + English) caption and 10 hashtags about this product.
+  Keep it engaging and marketing-oriented.
+  Product:
+  Name: ${product.title}
+  Description: ${product.body_html}
+  URL: ${process.env.SHOP_URL}/products/${product.handle}
   `;
   const res = await axios.post(
     "https://api.openai.com/v1/chat/completions",
@@ -43,38 +42,32 @@ Hashtags: ...
   return res.data.choices[0].message.content;
 }
 
-// ========== POST TO FACEBOOK & INSTAGRAM ==========
+// ====== POST TO INSTAGRAM (Cross-post to Facebook automatically) ======
 async function postToMeta(product, caption, imageUrl) {
-  // Post to Facebook Page
-  await axios.post(
-    `https://graph.facebook.com/${META_PAGE_ID}/photos`,
-    {
-      url: imageUrl,
-      caption: caption,
-      access_token: META_ACCESS_TOKEN,
-    }
-  );
-
-  // Post to Instagram
+  // Step 1: Create container on IG
   const igContainer = await axios.post(
-    `https://graph.facebook.com/v19.0/${META_IG_ID}/media`,
+    `https://graph.facebook.com/v21.0/${META_IG_ID}/media`,
     {
       image_url: imageUrl,
       caption: caption,
       access_token: META_ACCESS_TOKEN,
+      crossposted_to_page_id: "me", // يربط النشر تلقائيًا مع الصفحة
     }
   );
+
+  // Step 2: Publish container
   const creationId = igContainer.data.id;
   await axios.post(
-    `https://graph.facebook.com/v19.0/${META_IG_ID}/media_publish`,
+    `https://graph.facebook.com/v21.0/${META_IG_ID}/media_publish`,
     {
       creation_id: creationId,
       access_token: META_ACCESS_TOKEN,
     }
   );
+  console.log(`✅ Published ${product.title} to IG+FB cross-post`);
 }
 
-// ========== MAIN HANDLERS ==========
+// ====== CREATE / UPDATE / DELETE HANDLERS ======
 app.post("/webhook/product-create", async (req, res) => {
   if (!verifyShopify(req)) return res.sendStatus(401);
   const product = req.body;
@@ -92,28 +85,30 @@ app.post("/webhook/product-create", async (req, res) => {
 app.post("/webhook/product-update", async (req, res) => {
   if (!verifyShopify(req)) return res.sendStatus(401);
   const product = req.body;
+
+  // فقط المنتجات النشطة يتم تحديثها
   if (product.status === "active") {
     const caption = await generateCaption(product);
     const imageUrl = product.image?.src || product.images[0]?.src;
     await postToMeta(product, caption, imageUrl);
   } else {
-    // Optionally hide or delete from Meta
-    console.log(`Product ${product.title} is ${product.status}, consider removing.`);
+    console.log(`🟡 Product ${product.title} status = ${product.status}`);
   }
   res.sendStatus(200);
 });
 
 app.post("/webhook/product-delete", async (req, res) => {
   if (!verifyShopify(req)) return res.sendStatus(401);
-  console.log("Product deleted:", req.body.id);
-  // Optional: call Graph API to delete post if you stored post IDs
+  console.log("🗑️ Product deleted:", req.body.id);
+  // يمكنك حفظ post_id سابقًا لحذفه من Meta
   res.sendStatus(200);
 });
 
-// ========== SERVER TEST ==========
+// ====== TEST ROUTE ======
 app.get("/", (req, res) => {
-  res.send("🚀 eSelect Meta Auto-Publish system running.");
+  res.send("🚀 eSelect Cross-Posting system is live!");
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Server on port ${PORT}`));
+app.listen(process.env.PORT || 3000, () =>
+  console.log(`✅ Server running on port ${process.env.PORT || 3000}`)
+);
