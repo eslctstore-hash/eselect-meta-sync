@@ -1,114 +1,130 @@
-const express = require("express");
-const axios = require("axios");
-const crypto = require("crypto");
-require("dotenv").config();
+// ================== IMPORTS ==================
+import express from "express";
+import axios from "axios";
+import crypto from "crypto";
+import dotenv from "dotenv";
 
+dotenv.config();
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
-const { META_ACCESS_TOKEN, META_IG_ID, OPENAI_API_KEY, SHOPIFY_SECRET } = process.env;
+// ================== ENV VARS ==================
+const PORT = process.env.PORT || 3000;
+const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
+const META_PAGE_ID = process.env.META_PAGE_ID || "717438604779206"; // Facebook Page ID
+const META_IG_ID = process.env.META_IG_ID; // Instagram Business Account ID
+const SHOPIFY_SECRET = process.env.SHOPIFY_SECRET;
 
-// ====== VERIFY SHOPIFY WEBHOOK ======
-function verifyShopify(req) {
-  const hmacHeader = req.headers["x-shopify-hmac-sha256"];
-  const body = JSON.stringify(req.body);
-  const hash = crypto
-    .createHmac("sha256", SHOPIFY_SECRET)
-    .update(body, "utf8")
-    .digest("base64");
-  return hmacHeader === hash;
-}
-
-// ====== GENERATE CAPTION & HASHTAGS (GPT-4o) ======
-async function generateCaption(product) {
-  const prompt = `
-  Create a bilingual (Arabic + English) caption and 10 hashtags about this product.
-  Keep it engaging and marketing-oriented.
-  Product:
-  Name: ${product.title}
-  Description: ${product.body_html}
-  URL: ${process.env.SHOP_URL}/products/${product.handle}
-  `;
-  const res = await axios.post(
-    "https://api.openai.com/v1/chat/completions",
-    {
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-    },
-    {
-      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-    }
-  );
-  return res.data.choices[0].message.content;
-}
-
-// ====== POST TO INSTAGRAM (Cross-post to Facebook automatically) ======
-async function postToMeta(product, caption, imageUrl) {
-  // Step 1: Create container on IG
-  const igContainer = await axios.post(
-    `https://graph.facebook.com/v21.0/${META_IG_ID}/media`,
-    {
-      image_url: imageUrl,
-      caption: caption,
-      access_token: META_ACCESS_TOKEN,
-      crossposted_to_page_id: "me", // يربط النشر تلقائيًا مع الصفحة
-    }
-  );
-
-  // Step 2: Publish container
-  const creationId = igContainer.data.id;
-  await axios.post(
-    `https://graph.facebook.com/v21.0/${META_IG_ID}/media_publish`,
-    {
-      creation_id: creationId,
-      access_token: META_ACCESS_TOKEN,
-    }
-  );
-  console.log(`✅ Published ${product.title} to IG+FB cross-post`);
-}
-
-// ====== CREATE / UPDATE / DELETE HANDLERS ======
-app.post("/webhook/product-create", async (req, res) => {
-  if (!verifyShopify(req)) return res.sendStatus(401);
-  const product = req.body;
-  try {
-    const caption = await generateCaption(product);
-    const imageUrl = product.image?.src || product.images[0]?.src;
-    await postToMeta(product, caption, imageUrl);
-    res.sendStatus(200);
-  } catch (err) {
-    console.error("❌ Error:", err.response?.data || err.message);
-    res.sendStatus(500);
-  }
-});
-
-app.post("/webhook/product-update", async (req, res) => {
-  if (!verifyShopify(req)) return res.sendStatus(401);
-  const product = req.body;
-
-  // فقط المنتجات النشطة يتم تحديثها
-  if (product.status === "active") {
-    const caption = await generateCaption(product);
-    const imageUrl = product.image?.src || product.images[0]?.src;
-    await postToMeta(product, caption, imageUrl);
-  } else {
-    console.log(`🟡 Product ${product.title} status = ${product.status}`);
-  }
-  res.sendStatus(200);
-});
-
-app.post("/webhook/product-delete", async (req, res) => {
-  if (!verifyShopify(req)) return res.sendStatus(401);
-  console.log("🗑️ Product deleted:", req.body.id);
-  // يمكنك حفظ post_id سابقًا لحذفه من Meta
-  res.sendStatus(200);
-});
-
-// ====== TEST ROUTE ======
+// ================== STARTUP ==================
 app.get("/", (req, res) => {
-  res.send("🚀 eSelect Cross-Posting system is live!");
+  res.send("🚀 eSelect Meta Sync Server is running successfully!");
+});
+console.log(`✅ Server running on port ${PORT}`);
+
+// ================== VERIFY SHOPIFY WEBHOOK ==================
+function verifyShopifyWebhook(req) {
+  try {
+    const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
+    const body = JSON.stringify(req.body);
+    const digest = crypto
+      .createHmac("sha256", SHOPIFY_SECRET)
+      .update(body, "utf8")
+      .digest("base64");
+    return digest === hmacHeader;
+  } catch (err) {
+    console.error("❌ Error verifying webhook:", err.message);
+    return false;
+  }
+}
+
+// ================== META HELPERS ==================
+async function postToFacebook(message, imageUrl, productUrl) {
+  try {
+    const postUrl = `https://graph.facebook.com/v21.0/${META_PAGE_ID}/photos`;
+    const res = await axios.post(
+      postUrl,
+      {
+        caption: `${message}\n\n🔗 ${productUrl}`,
+        url: imageUrl,
+        access_token: META_ACCESS_TOKEN,
+      },
+      { headers: { "Content-Type": "application/json" } }
+    );
+    console.log("✅ [Meta] Posted to Facebook:", res.data.id);
+  } catch (err) {
+    console.error("❌ [Meta] Facebook Post Error:", err.response?.data || err.message);
+  }
+}
+
+async function postToInstagram(caption, imageUrl) {
+  try {
+    // Step 1: Upload Image
+    const mediaRes = await axios.post(
+      `https://graph.facebook.com/v21.0/${META_IG_ID}/media`,
+      {
+        image_url: imageUrl,
+        caption: caption,
+        access_token: META_ACCESS_TOKEN,
+      }
+    );
+
+    // Step 2: Publish it
+    const publishRes = await axios.post(
+      `https://graph.facebook.com/v21.0/${META_IG_ID}/media_publish`,
+      {
+        creation_id: mediaRes.data.id,
+        access_token: META_ACCESS_TOKEN,
+      }
+    );
+
+    console.log("✅ [Meta] Posted to Instagram:", publishRes.data.id);
+  } catch (err) {
+    console.error("❌ [Meta] Instagram Post Error:", err.response?.data || err.message);
+  }
+}
+
+// ================== WEBHOOK: PRODUCT CREATE ==================
+app.post("/webhook/product-create", async (req, res) => {
+  if (!verifyShopifyWebhook(req)) {
+    console.log("⚠️ [Webhook] Invalid signature, ignoring.");
+    return res.status(401).send("Invalid signature");
+  }
+
+  const product = req.body;
+  console.log("✅ [Webhook] Product created:", product.title);
+
+  const title = product.title;
+  const description = product.body_html?.replace(/<[^>]*>?/gm, "") || "";
+  const imageUrl = product?.images?.[0]?.src || "";
+  const productUrl = `https://eselect.store/products/${product.handle}`;
+
+  const caption = `🛍️ ${title}\n\n${description.substring(0, 250)}...\n\n#eSelect #عروض #تسوق #منتجات_عمانية`;
+
+  // Publish to Meta
+  await postToFacebook(caption, imageUrl, productUrl);
+  await postToInstagram(caption, imageUrl);
+
+  res.status(200).send("OK");
 });
 
-app.listen(process.env.PORT || 3000, () =>
-  console.log(`✅ Server running on port ${process.env.PORT || 3000}`)
-);
+// ================== WEBHOOK: PRODUCT UPDATE ==================
+app.post("/webhook/product-update", async (req, res) => {
+  if (!verifyShopifyWebhook(req)) return res.status(401).send("Invalid signature");
+
+  const product = req.body;
+  console.log("🌀 [Webhook] Product updated:", product.title);
+  res.status(200).send("OK");
+});
+
+// ================== WEBHOOK: PRODUCT DELETE ==================
+app.post("/webhook/product-delete", async (req, res) => {
+  if (!verifyShopifyWebhook(req)) return res.status(401).send("Invalid signature");
+
+  console.log("🗑️ [Webhook] Product deleted:", req.body.id);
+  res.status(200).send("OK");
+});
+
+// ================== START SERVER ==================
+app.listen(PORT, () => {
+  console.log(`🚀 eSelect Meta Sync running at port ${PORT}`);
+});
