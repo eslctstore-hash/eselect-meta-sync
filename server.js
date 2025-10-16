@@ -23,6 +23,7 @@ const log = {
   error: (msg) => console.log(chalk.red(`[❌] ${msg}`)),
 };
 
+// 🔒 التحقق من توقيع Shopify
 function verifyShopify(req) {
   try {
     const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
@@ -53,7 +54,7 @@ if (fs.existsSync(SYNC_FILE)) {
   fs.writeFileSync(SYNC_FILE, JSON.stringify({}));
 }
 
-// 🔹 تنظيف النص من الرموز مثل ** و Markdown
+// 🧹 تنظيف النص من الرموز الزائدة
 function cleanText(text) {
   return text
     ?.replace(/\*\*/g, "")
@@ -65,11 +66,11 @@ function cleanText(text) {
     ?.trim();
 }
 
-// 🔹 توليد وصف احترافي مع رابط
+// 🧠 توليد وصف إنستجرام مع رابط المنتج
 async function generateCaption(title, desc, handle) {
   try {
     const prompt = `
-اكتب وصفًا احترافيًا لمنشور إنستجرام لمنتج بعنوان "${title}" 
+اكتب وصفًا احترافيًا لمنشور إنستجرام لمنتج بعنوان "${title}"
 مع 10 هاشتاقات مناسبة، ثم أضف عبارة ختامية "احصل عليه الآن عبر متجر إي سيلكت"
 والوصف التالي:
 ${desc}
@@ -94,7 +95,7 @@ ${desc}
   }
 }
 
-// 🔹 النشر كألبوم (carousel)
+// 📸 نشر كألبوم (carousel)
 async function publishCarouselToInstagram(product) {
   try {
     const { title, body_html, images, handle } = product;
@@ -108,7 +109,6 @@ async function publishCarouselToInstagram(product) {
     const accessToken = process.env.META_LONG_LIVED_TOKEN;
     const igId = process.env.META_IG_BUSINESS_ID;
 
-    // رفع كل الصور كمكونات ألبوم
     const childIds = [];
     for (const imageUrl of imageUrls) {
       const uploadRes = await fetch(
@@ -132,7 +132,6 @@ async function publishCarouselToInstagram(product) {
       return;
     }
 
-    // إنشاء ألبوم carousel
     const containerRes = await fetch(
       `https://graph.facebook.com/v20.0/${igId}/media`,
       {
@@ -148,7 +147,6 @@ async function publishCarouselToInstagram(product) {
     );
     const containerData = await containerRes.json();
 
-    // نشر الألبوم
     const publishRes = await fetch(
       `https://graph.facebook.com/v20.0/${igId}/media_publish`,
       {
@@ -165,7 +163,7 @@ async function publishCarouselToInstagram(product) {
     if (publishData.id) {
       syncData[product.id] = { ig_post_id: publishData.id };
       fs.writeFileSync(SYNC_FILE, JSON.stringify(syncData, null, 2));
-      log.success(`📸 تم نشر المنتج ${title} كألبوم يحتوي ${childIds.length} صورة.`);
+      log.success(`📸 تم نشر المنتج على إنستجرام: ${title}`);
     } else {
       log.error(`❌ فشل نشر المنتج ${title}: ${JSON.stringify(publishData)}`);
     }
@@ -174,7 +172,7 @@ async function publishCarouselToInstagram(product) {
   }
 }
 
-// 🔹 معالجة المنتج
+// 🔁 معالجة المنتجات (إضافة/تحديث/حذف)
 async function handleProduct(data, type) {
   const title = data.title || "منتج بدون اسم";
   if (type === "create" || type === "update") {
@@ -195,7 +193,7 @@ async function handleProduct(data, type) {
   }
 }
 
-// 🔹 Webhooks Shopify
+// ✅ Webhooks الصحيحة حسب Shopify
 app.post("/webhook/product-create", async (req, res) => {
   log.info("📦 Received webhook: product-create");
   if (!verifyShopify(req)) return res.status(401).send("Invalid signature");
@@ -220,14 +218,14 @@ app.post("/webhook/product-delete", async (req, res) => {
   res.send("ok");
 });
 
-// 🔹 مزامنة فورية عند الطلب
+// ✳️ مزامنة فورية عند الطلب
 app.get("/sync-now", async (req, res) => {
   log.info("🔁 تنفيذ مزامنة فورية الآن...");
-  res.send("تم بدء المزامنة اليدوية الآن، راقب اللوج...");
+  res.send("✅ تم بدء المزامنة اليدوية الآن، راقب اللوج...");
   await periodicSync();
 });
 
-// 🔹 المزامنة التلقائية كل 6 ساعات
+// 🔄 مراجعة دورية كل 6 ساعات
 async function periodicSync() {
   try {
     log.info("🔄 بدء المراجعة الدورية مع Shopify...");
@@ -259,7 +257,7 @@ setTimeout(periodicSync, 5 * 60 * 1000);
 setInterval(periodicSync, 6 * 60 * 60 * 1000);
 
 app.get("/", (req, res) => {
-  res.send("🚀 eSelect Meta Sync v4 (Instagram Carousel + Manual Sync)");
+  res.send("🚀 eSelect Meta Sync v4.1 — Webhooks Fixed + Carousel Upload");
 });
 
 app.listen(PORT, () => {
