@@ -1,3 +1,11 @@
+/**
+ * eSelect Meta Sync v5.2.0
+ * - Smart Draft Handling
+ * - Smart Post Update
+ * - Smart Delay Control
+ * - Sync Persistence (sync.json)
+ */
+
 import express from "express";
 import axios from "axios";
 import crypto from "crypto";
@@ -7,20 +15,19 @@ import dotenv from "dotenv";
 dotenv.config();
 const app = express();
 
-// ⚙️ نستخدم raw body بدلاً من JSON فقط
+// ⚙️ إعداد body الخام للتحقق من HMAC
 app.use(
   express.json({
-    limit: "10mb",
+    limit: "15mb",
     verify: (req, res, buf) => {
-      req.rawBody = buf; // حفظ النسخة الخام للتحقق من HMAC
+      req.rawBody = buf;
     },
   })
 );
 
-// ==================== إعداد المتغيرات ====================
+// ==================== المتغيرات ====================
 const PORT = process.env.PORT || 3000;
 const SHOP_URL = process.env.SHOP_URL;
-const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const SHOPIFY_SECRET = process.env.SHOPIFY_SECRET;
 
 const META_GRAPH_URL = process.env.META_GRAPH_URL || "https://graph.facebook.com/v20.0";
@@ -30,10 +37,12 @@ const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 const SYNC_TO_FACEBOOK = process.env.SYNC_TO_FACEBOOK === "true";
 
 const SYNC_FILE = "./sync.json";
-let syncData = {};
-if (fs.existsSync(SYNC_FILE)) syncData = fs.readJSONSync(SYNC_FILE);
+if (!fs.existsSync(SYNC_FILE)) fs.writeJSONSync(SYNC_FILE, {});
+let syncData = fs.readJSONSync(SYNC_FILE);
 
 // ==================== أدوات مساعدة ====================
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
 function log(prefix, message, color = "\x1b[36m") {
   const reset = "\x1b[0m";
   console.log(`${color}${prefix}${reset} ${message}`);
@@ -50,32 +59,50 @@ function verifyShopifyHmac(req) {
   }
 }
 
-// ==================== النشر على Meta ====================
-async function publishToMeta(product) {
-  try {
-    const caption = `${product.title}\n\n${product.body_html
-      ?.replace(/<[^>]*>/g, "")
-      .replace(/\*/g, "")}\n\n🔗 احصل عليه الآن من متجر eSelect:\n${product.online_store_url}\n\n#eSelect #عمان #الكترونيات #تسوق_الكتروني #منتجات_مميزة #عروض`;
+// تنظيف الوصف لتجنب تجاوز الحد
+function cleanText(html) {
+  return html?.replace(/<[^>]*>/g, "").replace(/\*/g, "").substring(0, 1900);
+}
 
-    if (!product.images?.length) {
-      log("[⚠️]", `🚫 لا توجد صور للمنتج ${product.title}`, "\x1b[33m");
+// ==================== Meta Operations ====================
+
+// 🔁 Smart Update أو Create
+async function smartPublish(product) {
+  const caption = `${product.title}\n\n${cleanText(product.body_html)}\n\n🔗 احصل عليه الآن من متجر eSelect:\n${product.online_store_url}\n\n#eSelect #عمان #الكترونيات #تسوق_الكتروني`;
+
+  if (!product.images?.length) {
+    log("[⚠️]", `🚫 لا توجد صور للمنتج ${product.title}`, "\x1b[33m");
+    return;
+  }
+
+  const imageUrls = [...new Set(product.images.map((i) => i.src))].slice(0, 10);
+  const existing = syncData[product.id];
+
+  try {
+    // إذا كان هناك منشور سابق، نقوم بتحديثه بدل النشر من جديد
+    if (existing?.ig_post_id) {
+      log("[♻️]", `تحديث المنشور السابق للمنتج: ${product.title}`, "\x1b[33m");
+      await updateMetaPost(existing.ig_post_id, caption);
+      if (existing.fb_post_id && SYNC_TO_FACEBOOK) await updateMetaPost(existing.fb_post_id, caption);
+      syncData[product.id].updated_at = new Date().toISOString();
+      await fs.writeJSON(SYNC_FILE, syncData, { spaces: 2 });
       return;
     }
 
-    const uniqueImages = [...new Set(product.images.map(i => i.src))].slice(0, 10);
+    // انتظار ذكي لتجنب رفض API
+    await wait(5000);
 
-    log("[⌛]", "⏳ انتظار 10 ثوانٍ قبل النشر...");
-    await new Promise(r => setTimeout(r, 10000));
-
+    log("[📸]", `نشر منتج جديد: ${product.title}`, "\x1b[34m");
     const mediaIds = [];
-    for (const img of uniqueImages) {
-      const createMedia = await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media`, {
+
+    for (const img of imageUrls) {
+      const media = await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media`, {
         image_url: img,
         caption,
-        access_token: META_ACCESS_TOKEN
+        access_token: META_ACCESS_TOKEN,
       });
-      mediaIds.push(createMedia.data.id);
-      log("[📸]", `تم تجهيز الصورة: ${img}`, "\x1b[34m");
+      mediaIds.push(media.data.id);
+      await wait(2000);
     }
 
     const containerId =
@@ -86,43 +113,56 @@ async function publishToMeta(product) {
               media_type: "CAROUSEL",
               children: mediaIds,
               caption,
-              access_token: META_ACCESS_TOKEN
+              access_token: META_ACCESS_TOKEN,
             })
           ).data.id;
 
-    await new Promise(r => setTimeout(r, 5000));
+    await wait(4000);
 
-    const publish = await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media_publish`, {
+    const igPublish = await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media_publish`, {
       creation_id: containerId,
-      access_token: META_ACCESS_TOKEN
+      access_token: META_ACCESS_TOKEN,
     });
 
     let fbPublish = null;
     if (SYNC_TO_FACEBOOK) {
       fbPublish = await axios.post(`${META_GRAPH_URL}/${META_PAGE_ID}/feed`, {
         message: caption,
-        attached_media: mediaIds.map(id => ({ media_fbid: id })),
-        access_token: META_ACCESS_TOKEN
+        attached_media: mediaIds.map((id) => ({ media_fbid: id })),
+        access_token: META_ACCESS_TOKEN,
       });
       log("[🌍]", `✅ تم النشر أيضًا على فيسبوك (${product.title})`, "\x1b[32m");
     }
 
     syncData[product.id] = {
-      ig_post_id: publish.data.id,
+      ig_post_id: igPublish.data.id,
       fb_post_id: fbPublish?.data?.id || null,
-      updated_at: new Date().toISOString()
+      updated_at: new Date().toISOString(),
     };
     await fs.writeJSON(SYNC_FILE, syncData, { spaces: 2 });
 
-    log("[✅]", `تم النشر بنجاح على إنستجرام: ${product.title}`, "\x1b[32m");
+    log("[✅]", `تم النشر على إنستجرام: ${product.title}`, "\x1b[32m");
   } catch (err) {
     const status = err.response?.status;
-    const detail = err.response?.data?.error || err.message;
-    log("[❌]", `❌ فشل نشر المنتج ${product.title}: (HTTP ${status || "?"})`, "\x1b[31m");
-    console.error(detail);
+    const msg = err.response?.data?.error?.message || err.message;
+    log("[❌]", `فشل النشر أو التحديث (${product.title}): ${msg} (HTTP ${status || "?"})`, "\x1b[31m");
   }
 }
 
+// ✏️ تحديث منشور على Meta
+async function updateMetaPost(postId, caption) {
+  try {
+    await axios.post(`${META_GRAPH_URL}/${postId}`, {
+      caption,
+      access_token: META_ACCESS_TOKEN,
+    });
+    log("[🔁]", `تم تحديث المنشور (${postId})`, "\x1b[32m");
+  } catch (err) {
+    log("[⚠️]", `فشل تحديث المنشور (${postId}): ${err.message}`, "\x1b[33m");
+  }
+}
+
+// 🗑️ حذف المنشور من Meta عند المسودة
 async function deleteFromMeta(productId) {
   const data = syncData[productId];
   if (!data) return;
@@ -131,7 +171,7 @@ async function deleteFromMeta(productId) {
     if (data[key]) {
       try {
         await axios.delete(`${META_GRAPH_URL}/${data[key]}?access_token=${META_ACCESS_TOKEN}`);
-        log("[🗑️]", `تم حذف المنشور من ${key.includes("ig") ? "إنستجرام" : "فيسبوك"} (${productId})`, "\x1b[31m");
+        log("[🗑️]", `تم حذف ${key.includes("ig") ? "إنستجرام" : "فيسبوك"} (${productId})`, "\x1b[31m");
       } catch {
         log("[⚠️]", `فشل حذف ${key} (${productId})`, "\x1b[33m");
       }
@@ -142,47 +182,49 @@ async function deleteFromMeta(productId) {
   await fs.writeJSON(SYNC_FILE, syncData, { spaces: 2 });
 }
 
-// ==================== Webhooks من Shopify ====================
+// ==================== Webhooks ====================
 app.post("/webhook/products/create", async (req, res) => {
-  const valid = verifyShopifyHmac(req);
-  if (!valid) {
-    log("[⛔]", "HMAC غير صالح (create)", "\x1b[31m");
-    return res.status(401).send("Invalid HMAC");
-  }
+  if (!verifyShopifyHmac(req)) return res.status(401).send("Invalid HMAC");
   const product = req.body;
-  log("[🆕]", `تم إنشاء المنتج: ${product.title}`, "\x1b[32m");
-  if (product.status === "active") await publishToMeta(product);
+
+  if (product.status !== "active") {
+    log("[⏸️]", `تخطي المنتج (draft أو archived): ${product.title}`, "\x1b[33m");
+    return res.sendStatus(200);
+  }
+
+  log("[🆕]", `منتج جديد: ${product.title}`, "\x1b[32m");
+  await smartPublish(product);
   res.sendStatus(200);
 });
 
 app.post("/webhook/products/update", async (req, res) => {
-  const valid = verifyShopifyHmac(req);
-  if (!valid) {
-    log("[⛔]", "HMAC غير صالح (update)", "\x1b[31m");
-    return res.status(401).send("Invalid HMAC");
-  }
+  if (!verifyShopifyHmac(req)) return res.status(401).send("Invalid HMAC");
   const product = req.body;
-  log("[♻️]", `تم تحديث المنتج: ${product.title}`, "\x1b[33m");
-  if (product.status === "active") await publishToMeta(product);
-  else if (["draft", "archived"].includes(product.status)) await deleteFromMeta(product.id);
+
+  if (["draft", "archived"].includes(product.status)) {
+    await deleteFromMeta(product.id);
+    return res.sendStatus(200);
+  }
+
+  log("[♻️]", `تحديث منتج: ${product.title}`, "\x1b[33m");
+  await smartPublish(product);
   res.sendStatus(200);
 });
 
 app.post("/webhook/products/delete", async (req, res) => {
-  const valid = verifyShopifyHmac(req);
-  if (!valid) {
-    log("[⛔]", "HMAC غير صالح (delete)", "\x1b[31m");
-    return res.status(401).send("Invalid HMAC");
-  }
+  if (!verifyShopifyHmac(req)) return res.status(401).send("Invalid HMAC");
   const product = req.body;
   log("[🗑️]", `تم حذف المنتج: ${product.title}`, "\x1b[31m");
   await deleteFromMeta(product.id);
   res.sendStatus(200);
 });
 
-// ==================== تشغيل السيرفر ====================
-app.get("/", (_, res) => res.send("🚀 eSelect Meta Sync v4.8.2 Stable (Raw Body Fix) Running..."));
+// ==================== Running ====================
+app.get("/", (_, res) => {
+  res.send("🚀 eSelect Meta Sync v5.2.0 Smart Draft + Smart Update Running...");
+});
+
 app.listen(PORT, () => {
   log("[✅]", `Server running on port ${PORT}`, "\x1b[32m");
-  log("[🌐]", `Primary URL: https://eselect-meta-sync.onrender.com`, "\x1b[36m");
+  log("[🌐]", `eSelect Meta Sync v5.2.0 initialized successfully`, "\x1b[36m");
 });
