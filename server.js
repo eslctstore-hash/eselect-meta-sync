@@ -1,10 +1,8 @@
 /**
- * eSelect Meta Sync v5.2.2
- * - Smart Queue Control (2 min interval)
- * - Smart Retry Backoff (5 min on Meta 400/403)
- * - Smart Retry for Images (30, 60, 90 sec)
- * - Daily Auto Sync uses same queue logic
- * - Never skips products: all are guaranteed to publish eventually
+ * eSelect Meta Sync v5.2.3
+ * - Smart Create Delay (wait 2 minutes before queue)
+ * - Ignore Product Updates (handled by another server)
+ * - Smart Queue + Retry Backoff + Daily Sync retained
  */
 
 import express from "express";
@@ -67,7 +65,6 @@ function cleanText(html) {
 // ==================== SMART IMAGE CHECK ====================
 async function waitForImages(product) {
   if (!product.images?.length) return false;
-
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const url = product.images[0].src;
@@ -75,12 +72,11 @@ async function waitForImages(product) {
       log("[🖼️]", `الصور جاهزة (${product.title})`);
       return true;
     } catch {
-      const delay = attempt * 30000; // 30s, 60s, 90s
+      const delay = attempt * 30000; // 30, 60, 90 seconds
       log("[⏳]", `الصور غير جاهزة (${product.title}) - إعادة المحاولة بعد ${delay / 1000} ثانية...`, "\x1b[33m");
       await wait(delay);
     }
   }
-
   log("[⚠️]", `الصور لم تُصبح جاهزة بعد 3 محاولات (${product.title}) — سيتم نشرها لاحقًا.`, "\x1b[33m");
   return false;
 }
@@ -88,20 +84,19 @@ async function waitForImages(product) {
 // ==================== QUEUE SYSTEM ====================
 const publishQueue = [];
 let isPublishing = false;
-const QUEUE_INTERVAL = 120000; // 2 minutes between products
+const QUEUE_INTERVAL = 120000; // 2 minutes
 const RETRY_BACKOFF = 5 * 60 * 1000; // 5 minutes
 
 async function queueProcessor() {
   if (isPublishing || publishQueue.length === 0) return;
   isPublishing = true;
-
   const { product, source } = publishQueue.shift();
-  log("[🚀]", `بدء نشر من ${source}: ${product.title}`, "\x1b[36m");
 
+  log("[🚀]", `بدء نشر من ${source}: ${product.title}`, "\x1b[36m");
   await publishOrUpdate(product);
 
   isPublishing = false;
-  setTimeout(queueProcessor, QUEUE_INTERVAL); // next product after 2 mins
+  setTimeout(queueProcessor, QUEUE_INTERVAL);
 }
 
 // ==================== META PUBLISH ====================
@@ -110,19 +105,11 @@ async function publishOrUpdate(product) {
   const existing = syncData[product.id];
 
   try {
-    // تحديث منشور سابق
     if (existing?.ig_post_id) {
-      log("[♻️]", `تحديث منشور سابق (${product.title})`, "\x1b[33m");
-      await axios.post(`${META_GRAPH_URL}/${existing.ig_post_id}`, {
-        caption,
-        access_token: META_ACCESS_TOKEN,
-      });
-      syncData[product.id].updated_at = now();
-      await fs.writeJSON(SYNC_FILE, syncData, { spaces: 2 });
+      log("[♻️]", `تم نشر المنتج مسبقًا (${product.title}) – تخطي التكرار.`, "\x1b[33m");
       return;
     }
 
-    // تحقق من الصور قبل النشر
     const ready = await waitForImages(product);
     if (!ready) {
       syncData[product.id] = { status: "pending", title: product.title, updated_at: now() };
@@ -181,14 +168,12 @@ async function publishOrUpdate(product) {
     log("[✅]", `تم النشر (${product.title})`, "\x1b[32m");
   } catch (err) {
     const msg = err.response?.data?.error?.message || err.message;
-
     if (msg.includes("User is performing too many actions")) {
-      log("[⚠️]", `Meta رفض النشر بسبب الحد الأعلى (${product.title}) — إعادة المحاولة بعد 5 دقائق.`, "\x1b[33m");
+      log("[⚠️]", `Meta رفض النشر (${product.title}) — إعادة المحاولة بعد 5 دقائق.`, "\x1b[33m");
       setTimeout(() => publishQueue.push({ product, source: "RetryBackoff" }), RETRY_BACKOFF);
     } else {
       log("[❌]", `فشل النشر (${product.title}): ${msg}`, "\x1b[31m");
     }
-
     syncData[product.id] = { status: "failed", title: product.title, error: msg, updated_at: now() };
     await fs.writeJSON(SYNC_FILE, syncData, { spaces: 2 });
   }
@@ -200,9 +185,7 @@ async function dailyResync() {
     ([, v]) => v.status === "failed" || v.status === "pending"
   );
   if (!failed.length) return;
-
   log("[🔁]", `بدء المزامنة اليومية (${failed.length} منتج)...`, "\x1b[36m");
-
   for (const [id, data] of failed) {
     try {
       const productRes = await axios.get(
@@ -217,40 +200,44 @@ async function dailyResync() {
       log("[⚠️]", `فشل استرجاع المنتج ${id}: ${err.message}`, "\x1b[33m");
     }
   }
-
-  log("[ℹ️]", `تمت إضافة المنتجات إلى الطابور للمزامنة اليومية.`, "\x1b[36m");
+  log("[ℹ️]", "تمت إضافة المنتجات إلى الطابور اليومي.", "\x1b[36m");
   queueProcessor();
 }
-setInterval(dailyResync, 24 * 60 * 60 * 1000); // كل 24 ساعة
+setInterval(dailyResync, 24 * 60 * 60 * 1000);
 
 // ==================== WEBHOOKS ====================
+
+// 🧠 Smart Create Delay — wait 2 min before queuing
 app.post("/webhook/products/create", async (req, res) => {
   if (!verifyHmac(req)) return res.status(401).send("Invalid HMAC");
   const product = req.body;
   if (product.status !== "active") return res.sendStatus(200);
   log("[🆕]", `منتج جديد: ${product.title}`, "\x1b[32m");
-  publishQueue.push({ product, source: "WebhookCreate" });
-  queueProcessor();
+
+  // انتظار دقيقتين قبل إضافته للطابور
+  setTimeout(() => {
+    publishQueue.push({ product, source: "WebhookCreate" });
+    queueProcessor();
+  }, 120000);
+
   res.sendStatus(200);
 });
 
+// ❌ Ignore updates completely
 app.post("/webhook/products/update", async (req, res) => {
   if (!verifyHmac(req)) return res.status(401).send("Invalid HMAC");
   const product = req.body;
-  if (["draft", "archived"].includes(product.status)) return res.sendStatus(200);
-  log("[♻️]", `تحديث منتج: ${product.title}`, "\x1b[33m");
-  publishQueue.push({ product, source: "WebhookUpdate" });
-  queueProcessor();
+  log("[⚙️]", `تم تجاهل تحديث المنتج: ${product.title} (ت handled by translation server)`, "\x1b[33m");
   res.sendStatus(200);
 });
 
 // ==================== SERVER ====================
 app.get("/", (_, res) => {
-  res.send("🚀 eSelect Meta Sync v5.2.2 Smart Queue + Retry Backoff running...");
+  res.send("🚀 eSelect Meta Sync v5.2.3 Smart Delay + Ignore Update running...");
 });
 
 app.listen(PORT, () => {
   log("[✅]", `Server running on port ${PORT}`, "\x1b[32m");
-  log("[🕓]", `Queue interval: every 2 minutes`, "\x1b[36m");
-  log("[🌐]", `Daily resync enabled (every 24h)`, "\x1b[36m");
+  log("[🕓]", "Create delay: 2 minutes | Queue interval: 2 minutes", "\x1b[36m");
+  log("[🌐]", "Daily resync enabled (every 24h)", "\x1b[36m");
 });
