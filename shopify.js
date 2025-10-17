@@ -1,4 +1,4 @@
-// shopify.js
+// shopify.js (النسخة المصححة)
 const crypto = require('crypto');
 const { createPost } = require('./meta');
 const axios = require('axios');
@@ -6,25 +6,31 @@ const axios = require('axios');
 // دالة للتحقق من صحة Webhook القادم من Shopify
 const verifyShopifyWebhook = (req) => {
     const hmac = req.get('X-Shopify-Hmac-Sha256');
-    const body = req.body; // هنا الـ raw body
+    const body = req.body; // هنا الـ raw body (Buffer)
+    const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
+
+    if (!hmac || !body || !secret) {
+        return false;
+    }
+
     const hash = crypto
-        .createHmac('sha256', process.env.SHOPIFY_API_SECRET)
+        .createHmac('sha256', secret)
         .update(body, 'utf8', 'hex')
         .digest('base64');
+    
     return hmac === hash;
 };
 
-
 const productCreateWebhookHandler = async (req, res) => {
-    // التحقق من مصدر الطلب
-    // if (!verifyShopifyWebhook(req)) {
-    //     console.log('Webhook verification failed!');
-    //     return res.status(401).send('Unauthorized');
-    // }
+    // تفعيل التحقق الأمني - مهم جدًا
+    if (!verifyShopifyWebhook(req)) {
+        console.warn('Webhook verification failed! Request might be fraudulent.');
+        return res.status(401).send('Unauthorized');
+    }
 
-    // تم تجاوز التحقق مؤقتاً للتسهيل، لكن يجب تفعيله في البيئة الحقيقية
+    console.log('Webhook received and verified successfully.');
     
-    console.log('Webhook received for product creation.');
+    // تحويل البيانات الخام (Buffer) إلى نص ثم إلى كائن JSON
     const product = JSON.parse(req.body.toString());
 
     // تأكد أن المنتج فعال (active)
@@ -59,5 +65,4 @@ const getActiveShopifyProducts = async () => {
     }
 };
 
-
-module.exports = { productCreateWebhookHandler, verifyShopifyWebhook, getActiveShopifyProducts };
+module.exports = { productCreateWebhookHandler, getActiveShopifyProducts };
