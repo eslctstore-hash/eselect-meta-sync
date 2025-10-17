@@ -1,277 +1,176 @@
 import express from "express";
+import axios from "axios";
 import crypto from "crypto";
-import bodyParser from "body-parser";
-import fetch from "node-fetch";
-import fs from "fs";
-import path from "path";
-import dayjs from "dayjs";
-import chalk from "chalk";
+import fs from "fs-extra";
 import dotenv from "dotenv";
-
 dotenv.config();
-const app = express();
-const PORT = process.env.PORT || 3000;
 
-app.use("/webhook", bodyParser.raw({ type: "application/json" }));
-app.use(express.json());
+const app = express();
+app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-const log = {
-  info: (msg) => console.log(chalk.blue(`[ℹ️] ${msg}`)),
-  success: (msg) => console.log(chalk.green(`[✅] ${msg}`)),
-  warn: (msg) => console.log(chalk.yellow(`[⚠️] ${msg}`)),
-  error: (msg) => console.log(chalk.red(`[❌] ${msg}`)),
-};
+const PORT = process.env.PORT || 3000;
+const SHOP_URL = process.env.SHOP_URL;
+const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+const SHOPIFY_SECRET = process.env.SHOPIFY_SECRET;
+const META_GRAPH_URL = process.env.META_GRAPH_URL;
+const META_IG_ID = process.env.META_IG_ID;
+const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 
-// 🔒 التحقق من توقيع Shopify
+const SYNC_FILE = "./sync.json";
+if (!fs.existsSync(SYNC_FILE)) fs.writeJsonSync(SYNC_FILE, { posts: {} });
+
+// 🧠 Helper — verify Shopify webhook
 function verifyShopify(req) {
-  try {
-    const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
-    const body = req.body;
-    const digest = crypto
-      .createHmac("sha256", process.env.SHOPIFY_SECRET)
-      .update(body, "utf8")
-      .digest("base64");
+  const hmac = req.get("x-shopify-hmac-sha256");
+  const body = JSON.stringify(req.body);
+  const digest = crypto
+    .createHmac("sha256", SHOPIFY_SECRET)
+    .update(body, "utf8")
+    .digest("base64");
+  return digest === hmac;
+}
 
-    const verified = crypto.timingSafeEqual(
-      Buffer.from(digest, "utf8"),
-      Buffer.from(hmacHeader, "utf8")
+// 🧠 Helper — post log to console + render UI
+function logLine(line, res = null) {
+  console.log(line);
+  if (res) res.write(`${line}\n`);
+}
+
+// 📦 Publish to Instagram
+async function publishToInstagram(product) {
+  const desc = (product.body_html || "").replace(/(<([^>]+)>)/gi, "").trim();
+  const caption = `✨ ${product.title}\n\n${desc}\n\n🔗 احصل عليه الآن عبر متجرنا:\n${SHOP_URL}/products/${product.handle}`;
+  const images = product.images?.map((img) => img.src) || [];
+
+  if (!images.length) {
+    console.log(`[⚠️] 🚫 لا توجد صور للمنتج ${product.title}`);
+    return false;
+  }
+
+  try {
+    // 1️⃣ إنشاء الوسائط
+    const creationIds = [];
+    for (const url of images.slice(0, 10)) {
+      const res = await axios.post(
+        `${META_GRAPH_URL}/${META_IG_ID}/media`,
+        {
+          image_url: url,
+          caption: caption,
+          access_token: META_ACCESS_TOKEN,
+        }
+      );
+      creationIds.push(res.data.id);
+    }
+
+    // 2️⃣ إنشاء ألبوم
+    const album = await axios.post(
+      `${META_GRAPH_URL}/${META_IG_ID}/media`,
+      {
+        children: creationIds,
+        media_type: "CAROUSEL",
+        caption: caption,
+        access_token: META_ACCESS_TOKEN,
+      }
     );
-    if (verified) log.success("✅ Shopify HMAC verified successfully");
-    else log.error("❌ Invalid Shopify signature");
-    return verified;
+
+    // 3️⃣ نشر الألبوم
+    await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media_publish`, {
+      creation_id: album.data.id,
+      access_token: META_ACCESS_TOKEN,
+    });
+
+    console.log(`[✅] 📸 تم نشر المنتج على إنستجرام: ${product.title}`);
+    return true;
   } catch (err) {
-    log.error("HMAC verification error: " + err.message);
+    console.error(`[❌] فشل نشر المنتج ${product.title}: ${err.response?.data?.error?.message}`);
     return false;
   }
 }
 
-const SYNC_FILE = path.join("./sync.json");
-let syncData = {};
-if (fs.existsSync(SYNC_FILE)) {
-  syncData = JSON.parse(fs.readFileSync(SYNC_FILE));
-} else {
-  fs.writeFileSync(SYNC_FILE, JSON.stringify({}));
-}
+// 🔁 Sync from Shopify
+async function syncProducts(res = null) {
+  const startTime = Date.now();
+  logLine("[ℹ️] 🔁 بدء المزامنة اليدوية...", res);
 
-// 🧹 تنظيف النص من الرموز الزائدة
-function cleanText(text) {
-  return text
-    ?.replace(/\*\*/g, "")
-    ?.replace(/\*/g, "")
-    ?.replace(/\_/g, "")
-    ?.replace(/\#/g, "")
-    ?.replace(/\[/g, "")
-    ?.replace(/\]/g, "")
-    ?.trim();
-}
+  const syncData = await fs.readJson(SYNC_FILE);
+  let newCount = 0;
+  let skipped = 0;
 
-// 🧠 توليد وصف إنستجرام مع رابط المنتج
-async function generateCaption(title, desc, handle) {
   try {
-    const prompt = `
-اكتب وصفًا احترافيًا لمنشور إنستجرام لمنتج بعنوان "${title}"
-مع 10 هاشتاقات مناسبة، ثم أضف عبارة ختامية "احصل عليه الآن عبر متجر إي سيلكت"
-والوصف التالي:
-${desc}
-    `;
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [{ role: "user", content: prompt }],
-      }),
+    const shopifyRes = await axios.get(`${SHOP_URL}/admin/api/2025-10/products.json`, {
+      headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN },
+      params: { limit: 50 }
     });
-    const data = await response.json();
-    const caption = cleanText(data.choices[0]?.message?.content || title);
-    return `${caption}\n\n🔗 رابط المنتج:\nhttps://eselect.store/products/${handle}`;
-  } catch (err) {
-    log.error("فشل توليد الوصف التلقائي: " + err.message);
-    return `${title}\n\nhttps://eselect.store/products/${handle}`;
-  }
-}
-
-// 📸 نشر كألبوم Carousel
-async function publishCarouselToInstagram(product) {
-  try {
-    const { title, body_html, images, handle } = product;
-    if (!images?.length) {
-      log.warn(`🚫 لا توجد صور للمنتج ${title}`);
+    const products = shopifyRes.data.products || [];
+    if (!products.length) {
+      logLine("[⚠️] ⚠️ لم يتم العثور على منتجات.", res);
       return;
     }
 
-    const caption = await generateCaption(title, body_html, handle);
-    const imageUrls = images.slice(0, 10).map((img) => img.src);
-    const accessToken = process.env.META_LONG_LIVED_TOKEN;
-    const igId = process.env.META_IG_BUSINESS_ID;
-
-    const childIds = [];
-    for (const imageUrl of imageUrls) {
-      const uploadRes = await fetch(
-        `https://graph.facebook.com/v20.0/${igId}/media`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            image_url: imageUrl,
-            is_carousel_item: true,
-            access_token: accessToken,
-          }),
-        }
-      );
-      const uploadData = await uploadRes.json();
-      if (uploadData.id) childIds.push(uploadData.id);
-    }
-
-    if (childIds.length === 0) {
-      log.error(`❌ فشل رفع الصور لألبوم المنتج ${title}`);
-      return;
-    }
-
-    // ✅ تأخير 8 ثوانٍ للسماح للوسائط بالجهوزية
-    await new Promise((resolve) => setTimeout(resolve, 8000));
-
-    const containerRes = await fetch(
-      `https://graph.facebook.com/v20.0/${igId}/media`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          media_type: "CAROUSEL",
-          caption,
-          children: childIds,
-          access_token: accessToken,
-        }),
+    for (const product of products) {
+      if (syncData.posts[product.id]) {
+        skipped++;
+        continue;
       }
-    );
-    const containerData = await containerRes.json();
-
-    if (!containerData.id) {
-      log.error(`❌ فشل إنشاء ألبوم المنتج ${title}`);
-      return;
-    }
-
-    // ✅ تأخير إضافي بسيط قبل النشر النهائي
-    await new Promise((resolve) => setTimeout(resolve, 5000));
-
-    const publishRes = await fetch(
-      `https://graph.facebook.com/v20.0/${igId}/media_publish`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          creation_id: containerData.id,
-          access_token: accessToken,
-        }),
+      const ok = await publishToInstagram(product);
+      if (ok) {
+        newCount++;
+        syncData.posts[product.id] = { title: product.title, time: new Date().toISOString() };
+        await fs.writeJson(SYNC_FILE, syncData, { spaces: 2 });
       }
-    );
-
-    const publishData = await publishRes.json();
-    if (publishData.id) {
-      syncData[product.id] = { ig_post_id: publishData.id };
-      fs.writeFileSync(SYNC_FILE, JSON.stringify(syncData, null, 2));
-      log.success(`📸 تم نشر المنتج على إنستجرام: ${title}`);
-    } else {
-      log.error(`❌ فشل نشر المنتج ${title}: ${JSON.stringify(publishData)}`);
     }
+
+    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+    logLine(`\n[📊] تمت المزامنة بنجاح — تم نشر ${newCount} منتجات جديدة وتخطي ${skipped} منتجات.`, res);
+    logLine(`[⏱] استغرقت المزامنة ${duration} ثانية.`, res);
+    logLine(`[🧩] إجمالي المنتجات المفحوصة: ${products.length}`, res);
   } catch (err) {
-    log.error(`خطأ أثناء النشر: ${err.message}`);
+    console.error("[❌] خطأ أثناء المزامنة:", err.message);
+    if (res) res.write(`[❌] ${err.message}\n`);
   }
+
+  if (res) res.end("\n✅ تمت المزامنة اليدوية بنجاح.\n");
 }
 
-// 🔁 معالجة المنتج (إضافة/تحديث/حذف)
-async function handleProduct(data, type) {
-  const title = data.title || "منتج بدون اسم";
-  if (type === "create" || type === "update") {
-    log.info(`🆕 مزامنة المنتج: ${title}`);
-    await publishCarouselToInstagram(data);
-  } else if (type === "delete") {
-    log.warn(`🗑️ حذف المنتج: ${title}`);
-    const post = syncData[data.id];
-    if (post?.ig_post_id) {
-      await fetch(
-        `https://graph.facebook.com/v20.0/${post.ig_post_id}?access_token=${process.env.META_LONG_LIVED_TOKEN}`,
-        { method: "DELETE" }
-      );
-      delete syncData[data.id];
-      fs.writeFileSync(SYNC_FILE, JSON.stringify(syncData, null, 2));
-      log.warn(`🚮 تم حذف منشور إنستجرام للمنتج ${title}`);
-    }
-  }
-}
-
-// ✅ Webhooks
-app.post("/webhook/product-create", async (req, res) => {
-  log.info("📦 Received webhook: product-create");
-  if (!verifyShopify(req)) return res.status(401).send("Invalid signature");
-  const data = JSON.parse(req.body.toString("utf8"));
-  await handleProduct(data, "create");
-  res.send("ok");
+// 🌐 Webhooks
+app.post("/webhook/product-create", (req, res) => {
+  if (!verifyShopify(req)) return res.status(401).send("HMAC failed");
+  console.log("[🆕] 📦 منتج جديد تم إنشاؤه.");
+  publishToInstagram(req.body);
+  res.status(200).send("OK");
 });
 
-app.post("/webhook/product-update", async (req, res) => {
-  log.info("📦 Received webhook: product-update");
-  if (!verifyShopify(req)) return res.status(401).send("Invalid signature");
-  const data = JSON.parse(req.body.toString("utf8"));
-  await handleProduct(data, "update");
-  res.send("ok");
+app.post("/webhook/product-update", (req, res) => {
+  if (!verifyShopify(req)) return res.status(401).send("HMAC failed");
+  console.log("[♻️] 🔄 تم تحديث المنتج.");
+  publishToInstagram(req.body);
+  res.status(200).send("OK");
 });
 
+// 🧹 Deletion hook
 app.post("/webhook/product-delete", async (req, res) => {
-  log.info("📦 Received webhook: product-delete");
-  if (!verifyShopify(req)) return res.status(401).send("Invalid signature");
-  const data = JSON.parse(req.body.toString("utf8"));
-  await handleProduct(data, "delete");
-  res.send("ok");
+  if (!verifyShopify(req)) return res.status(401).send("HMAC failed");
+  const syncData = await fs.readJson(SYNC_FILE);
+  delete syncData.posts[req.body.id];
+  await fs.writeJson(SYNC_FILE, syncData, { spaces: 2 });
+  console.log(`[🗑️] تم حذف المنتج: ${req.body.id}`);
+  res.status(200).send("Deleted OK");
 });
 
-// ✳️ مزامنة فورية
+// 🌍 Manual sync via browser
 app.get("/sync-now", async (req, res) => {
-  log.info("🔁 تنفيذ مزامنة فورية الآن...");
-  res.send("✅ تم بدء المزامنة اليدوية الآن، راقب اللوج...");
-  await periodicSync();
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  syncProducts(res);
 });
 
-// 🔄 مراجعة دورية كل 6 ساعات
-async function periodicSync() {
-  try {
-    log.info("🔄 بدء المراجعة الدورية مع Shopify...");
-    const shopifyUrl = `${process.env.SHOP_URL}/admin/api/2024-07/products.json?limit=250`;
-    const res = await fetch(shopifyUrl, {
-      headers: {
-        "X-Shopify-Access-Token": process.env.SHOPIFY_ACCESS_TOKEN,
-        "Content-Type": "application/json",
-      },
-    });
-    const data = await res.json();
-    if (!data.products) {
-      log.warn("⚠️ لم يتم العثور على منتجات.");
-      return;
-    }
-    for (const product of data.products) {
-      if (!syncData[product.id]) {
-        log.info(`🆕 منتج جديد غير متزامن: ${product.title}`);
-        await publishCarouselToInstagram(product);
-      }
-    }
-    log.success("✅ تمت المزامنة الدورية بنجاح.");
-  } catch (err) {
-    log.error(`❌ فشل المزامنة الدورية: ${err.message}`);
-  }
-}
-
-setTimeout(periodicSync, 5 * 60 * 1000);
-setInterval(periodicSync, 6 * 60 * 60 * 1000);
-
-app.get("/", (req, res) => {
-  res.send("🚀 eSelect Meta Sync v4.2 — Carousel Publishing Fixed");
+// Root
+app.get("/", (_, res) => {
+  res.send("🚀 eSelect Meta Sync v4.3 running — manual sync at /sync-now");
 });
 
+// Start
 app.listen(PORT, () => {
-  log.success(`✅ Server running on port ${PORT}`);
-  log.info(`🌐 Primary URL: https://eselect-meta-sync.onrender.com`);
+  console.log(`[✅] ✅ Server running on port ${PORT}`);
+  console.log(`[🌐] Primary URL: https://eselect-meta-sync.onrender.com`);
 });
