@@ -1,26 +1,14 @@
 {
   "name": "eselect-meta-sync",
-  "version": "5.0.0",
-  "description": "Automatic synchronization of Shopify products with Instagram & Facebook via Meta Graph API.",
+  "version": "4.8.0",
+  "description": "Ultimate automatic synchronization of Shopify products with Instagram & Facebook via Meta Graph API.",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js"
   },
-  "keywords": [
-    "shopify",
-    "meta",
-    "facebook",
-    "instagram",
-    "automation",
-    "webhook",
-    "eselect"
-  ],
-  "author": "Salim Al Sulaimi",
-  "license": "MIT",
   "dependencies": {
     "axios": "^1.7.2",
-    "body-parser": "^1.20.3",
     "crypto": "^1.0.1",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
