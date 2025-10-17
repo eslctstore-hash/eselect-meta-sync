@@ -1,10 +1,9 @@
-// meta.js
+// meta.js (Version with detailed error logging)
 const axios = require('axios');
 const { generateHashtags } = require('./openai');
-const fs = require('fs'); // <== تم التصحيح هنا
+const fs = require('fs');
 const path = require('path');
 
-// قاعدة البيانات البسيطة
 const DB_PATH = path.join(__dirname, 'db.json');
 
 function readDb() {
@@ -19,7 +18,6 @@ function writeDb(data) {
     fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
 }
 
-// الدالة الرئيسية لإنشاء المنشور
 const createPost = async (product) => {
     const productUrl = `https://${process.env.SHOPIFY_SHOP_URL}/products/${product.handle}`;
     let caption = `${product.title}\n\n${product.body_html.replace(/<[^>]*>/g, '').substring(0, 1500)}...\n\nاطلبه الآن:\n${productUrl}\n\n`;
@@ -30,39 +28,45 @@ const createPost = async (product) => {
 
         const imageUrl = product.images[0]?.src;
         if (!imageUrl) {
-            console.error('Product has no image.');
+            console.error('Product has no image. Aborting post.');
             return;
         }
 
-        // نشر على انستجرام
+        console.log(`Attempting to post with image URL: ${imageUrl}`);
         const igPostId = await postToInstagram(imageUrl, caption);
         
-        // يمكنك إضافة دالة للنشر على فيسبوك هنا بنفس الطريقة
-        // const fbPostId = await postToFacebook(imageUrl, caption);
-
-        // حفظ معلومات المنشور في قاعدة البيانات
         if (igPostId) {
             const db = readDb();
             db.push({
                 shopifyProductId: product.id,
                 instagramPostId: igPostId,
-                // facebookPostId: fbPostId,
                 status: 'active'
             });
             writeDb(db);
-            console.log(`Successfully posted product ${product.id} to Instagram.`);
+            console.log(`✅ Successfully posted product ${product.id} to Instagram.`);
         }
     } catch (error) {
-        console.error(`Failed to create post for product ${product.id}:`, error.message);
+        // =================================================================
+        // ============== THIS IS THE IMPORTANT CHANGE ==============
+        // =================================================================
+        console.error(`❌ Failed to create post for product ${product.id}.`);
+        if (error.response) {
+            // If the error is from the API request, print the detailed response from Meta
+            console.error('Error Details from Meta:', JSON.stringify(error.response.data, null, 2));
+        } else {
+            // Otherwise, print the general error message
+            console.error('General Error:', error.message);
+        }
+        // =================================================================
     }
 };
 
-// النشر على انستجرام
 const postToInstagram = async (imageUrl, caption) => {
     const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
     const accessToken = process.env.META_ACCESS_TOKEN;
 
-    // الخطوة 1: إنشاء حاوية
+    // Step 1: Create Media Container
+    console.log('Step 1: Creating media container...');
     const containerUrl = `https://graph.facebook.com/v18.0/${igAccountId}/media`;
     const containerResponse = await axios.post(containerUrl, {
         image_url: imageUrl,
@@ -70,26 +74,24 @@ const postToInstagram = async (imageUrl, caption) => {
         access_token: accessToken,
     });
     const containerId = containerResponse.data.id;
+    console.log(`Step 1 successful. Container ID: ${containerId}`);
 
-    // الخطوة 2: نشر الحاوية
+    // Step 2: Publish the container
+    console.log('Step 2: Publishing container...');
     const publishUrl = `https://graph.facebook.com/v18.0/${igAccountId}/media_publish`;
     const publishResponse = await axios.post(publishUrl, {
         creation_id: containerId,
         access_token: accessToken,
     });
+    console.log('Step 2 successful. Post published.');
 
     return publishResponse.data.id;
 };
 
-// دالة لتحديث حالة المنشور (مثال: إخفاء)
-const updatePostStatus = async (postId, shouldEnable) => {
-    // Meta API لا تدعم "تعطيل" المنشور بسهولة، البديل هو أرشفته أو حذفه
-    // هنا مثال بسيط لتوضيح الفكرة، قد تحتاج لتعديل الصلاحيات أو الطريقة
-    console.log(`Updating post ${postId} status to ${shouldEnable ? 'enabled' : 'disabled'}. Logic to be implemented.`);
-    // مثال:
-    // const url = `https://graph.facebook.com/${postId}?is_published=${shouldEnable}&access_token=${process.env.META_ACCESS_TOKEN}`;
-    // await axios.post(url);
-}
+// ... (rest of the file remains the same) ...
 
+const updatePostStatus = async (postId, shouldEnable) => {
+    console.log(`Updating post ${postId} status to ${shouldEnable ? 'enabled' : 'disabled'}. Logic to be implemented.`);
+}
 
 module.exports = { createPost, updatePostStatus, readDb, writeDb };
