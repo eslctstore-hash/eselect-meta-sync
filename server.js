@@ -31,8 +31,8 @@ const pendingProducts = new Map(); // For Debounce logic
 const publishQueue = []; // For sequential, safe publishing
 let isProcessingQueue = false;
 
-const DEBOUNCE_DELAY = 30 * 1000; // 30 ثانية انتظار للتأكد من وصول كل التحديثات
-const PUBLISH_INTERVAL = 90 * 1000; // 90 ثانية فاصل بين كل عملية نشر
+const DEBOUNCE_DELAY = 60 * 1000; // 30 ثانية انتظار للتأكد من وصول كل التحديثات
+const PUBLISH_INTERVAL = 180 * 1000; // 90 ثانية فاصل بين كل عملية نشر
 
 const log = (prefix, message, color = "\x1b[36m") => {
     const reset = "\x1b[0m"; // <-- تم نقل هذا السطر للأعلى (هذا هو الإصلاح)
