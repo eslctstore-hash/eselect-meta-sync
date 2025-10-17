@@ -1,7 +1,7 @@
 /**
- * eSelect Meta Sync v9.0.0 - The Cool-down Solution
- * By Gemini: This version introduces a mandatory "cool-down" period after an update storm,
- * before attempting the first publication. This is the definitive fix for the "too many actions" error.
+ * eSelect Meta Sync v9.1.0 - Payload Size Fix
+ * By Gemini: Increased the payload limit to handle large webhooks from Shopify,
+ * which resolves the downstream "no images found" error.
  */
 
 import express from "express";
@@ -12,7 +12,9 @@ import dotenv from "dotenv";
 dotenv.config();
 const app = express();
 
+// The fix is on the next line. We are increasing the allowed request size.
 app.use(express.json({
+    limit: '10mb', // <-- THIS IS THE FIX. Increased limit from 100kb to 10mb.
     verify: (req, res, buf) => { req.rawBody = buf; }
 }));
 
@@ -70,7 +72,7 @@ async function generateCaption(product) {
         return response.data.choices[0].message.content.trim();
     } catch (error) {
         log("[❌]", `AI caption generation failed: ${error.message}`, "\x1b[31m");
-        return `${product.title}\n\n${cleanText(product.body_html)}`; // Fallback
+        return `${product.title}\n\n${cleanText(product.body_html)}`;
     }
 }
 
@@ -134,7 +136,7 @@ async function processQueue() {
     }, PUBLISH_INTERVAL);
 }
 
-// ==================== WEBHOOK HANDLER (The New Brain) ====================
+// ==================== WEBHOOK HANDLER (The Brain) ====================
 function handleProductWebhook(product) {
     if (product.status !== 'active') {
         log("[🟡]", `Skipping product "${product.title}" with status: ${product.status}`, "\x1b[33m");
@@ -149,14 +151,15 @@ function handleProductWebhook(product) {
     }
 
     const timer = setTimeout(() => {
-        log("[⏰]", `Debounce timer finished for "${product.title}".`);
+        const latestProductData = pendingProducts.get(product.id)?.product || product;
+        log("[⏰]", `Debounce timer finished for "${latestProductData.title}".`);
         pendingProducts.delete(product.id);
 
         log("[🧊]", `ENTERING MANDATORY COOL-DOWN PERIOD of ${COOL_DOWN_PERIOD / 1000 / 60} minutes before queuing.`, "\x1b[96m");
 
         setTimeout(() => {
-            log("[✅]", `Cool-down finished. Adding "${product.title}" to publish queue.`, "\x1b[32m");
-            publishQueue.push(product);
+            log("[✅]", `Cool-down finished. Adding "${latestProductData.title}" to publish queue.`, "\x1b[32m");
+            publishQueue.push(latestProductData);
             processQueue();
         }, COOL_DOWN_PERIOD);
 
@@ -168,5 +171,5 @@ function handleProductWebhook(product) {
 app.post("/webhook/product-create", (req, res) => { res.sendStatus(200); handleProductWebhook(req.body); });
 app.post("/webhook/product-update", (req, res) => { res.sendStatus(200); handleProductWebhook(req.body); });
 
-app.get("/", (_, res) => res.send(`🚀 eSelect Meta Sync v9.0 - Cool-down Active. Queue size: ${publishQueue.length}`));
+app.get("/", (_, res) => res.send(`🚀 eSelect Meta Sync v9.1 - Payload Fix Active. Queue size: ${publishQueue.length}`));
 app.listen(PORT, () => log("[✅]", `Server running on port ${PORT}`, "\x1b[32m"));
