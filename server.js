@@ -3,174 +3,172 @@ import axios from "axios";
 import crypto from "crypto";
 import fs from "fs-extra";
 import dotenv from "dotenv";
+
 dotenv.config();
-
 const app = express();
-app.use(express.json({ limit: "20mb" }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "10mb" }));
 
+// ==================== إعداد المتغيرات ====================
 const PORT = process.env.PORT || 3000;
 const SHOP_URL = process.env.SHOP_URL;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const SHOPIFY_SECRET = process.env.SHOPIFY_SECRET;
-const META_GRAPH_URL = process.env.META_GRAPH_URL;
+
+const META_GRAPH_URL = process.env.META_GRAPH_URL || "https://graph.facebook.com/v20.0";
 const META_IG_ID = process.env.META_IG_ID;
+const META_PAGE_ID = process.env.META_PAGE_ID;
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 
+// ==================== بيانات المزامنة ====================
 const SYNC_FILE = "./sync.json";
-if (!fs.existsSync(SYNC_FILE)) fs.writeJsonSync(SYNC_FILE, { posts: {} });
+let syncData = {};
+if (fs.existsSync(SYNC_FILE)) syncData = fs.readJSONSync(SYNC_FILE);
 
-// 🧠 Helper — verify Shopify webhook
-function verifyShopify(req) {
-  const hmac = req.get("x-shopify-hmac-sha256");
+// ==================== أدوات مساعدة ====================
+function log(prefix, message, color = "\x1b[36m") {
+  const reset = "\x1b[0m";
+  console.log(`${color}${prefix}${reset} ${message}`);
+}
+
+function verifyShopifyHmac(req) {
+  const hmac = req.headers["x-shopify-hmac-sha256"];
+  if (!hmac) return false;
   const body = JSON.stringify(req.body);
-  const digest = crypto
-    .createHmac("sha256", SHOPIFY_SECRET)
-    .update(body, "utf8")
-    .digest("base64");
-  return digest === hmac;
+  const digest = crypto.createHmac("sha256", SHOPIFY_SECRET).update(body).digest("base64");
+  return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmac));
 }
 
-// 🧠 Helper — post log to console + render UI
-function logLine(line, res = null) {
-  console.log(line);
-  if (res) res.write(`${line}\n`);
-}
-
-// 📦 Publish to Instagram
+// ==================== نشر إلى Instagram ====================
 async function publishToInstagram(product) {
-  const desc = (product.body_html || "").replace(/(<([^>]+)>)/gi, "").trim();
-  const caption = `✨ ${product.title}\n\n${desc}\n\n🔗 احصل عليه الآن عبر متجرنا:\n${SHOP_URL}/products/${product.handle}`;
-  const images = product.images?.map((img) => img.src) || [];
-
-  if (!images.length) {
-    console.log(`[⚠️] 🚫 لا توجد صور للمنتج ${product.title}`);
-    return false;
-  }
-
   try {
-    // 1️⃣ إنشاء الوسائط
-    const creationIds = [];
-    for (const url of images.slice(0, 10)) {
-      const res = await axios.post(
+    const caption = `${product.title}\n\n${product.body_html
+      ?.replace(/<[^>]*>/g, "")
+      .replace(/\*/g, "")}\n\n🔗 ${product.online_store_url}`;
+
+    if (!product.images?.length) {
+      log("[⚠️]", `🚫 لا توجد صور للمنتج ${product.title}`, "\x1b[33m");
+      return;
+    }
+
+    // تحميل جميع الصور
+    const mediaIds = [];
+    for (const img of product.images) {
+      const createMedia = await axios.post(
         `${META_GRAPH_URL}/${META_IG_ID}/media`,
         {
-          image_url: url,
-          caption: caption,
+          image_url: img.src,
+          caption,
           access_token: META_ACCESS_TOKEN,
         }
       );
-      creationIds.push(res.data.id);
+      mediaIds.push(createMedia.data.id);
+      log("[📸]", `تم تجهيز الصورة: ${img.src}`, "\x1b[34m");
     }
 
-    // 2️⃣ إنشاء ألبوم
-    const album = await axios.post(
-      `${META_GRAPH_URL}/${META_IG_ID}/media`,
+    // إنشاء ألبوم إذا أكثر من صورة
+    const containerId =
+      mediaIds.length === 1
+        ? mediaIds[0]
+        : (
+            await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media`, {
+              media_type: "CAROUSEL",
+              children: mediaIds,
+              caption,
+              access_token: META_ACCESS_TOKEN,
+            })
+          ).data.id;
+
+    // الانتظار قبل النشر
+    await new Promise((r) => setTimeout(r, 3000));
+
+    // نشر الوسائط
+    const publish = await axios.post(
+      `${META_GRAPH_URL}/${META_IG_ID}/media_publish`,
       {
-        children: creationIds,
-        media_type: "CAROUSEL",
-        caption: caption,
+        creation_id: containerId,
         access_token: META_ACCESS_TOKEN,
       }
     );
 
-    // 3️⃣ نشر الألبوم
-    await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media_publish`, {
-      creation_id: album.data.id,
-      access_token: META_ACCESS_TOKEN,
-    });
-
-    console.log(`[✅] 📸 تم نشر المنتج على إنستجرام: ${product.title}`);
-    return true;
+    log("[✅]", `📸 تم نشر المنتج على إنستجرام: ${product.title}`, "\x1b[32m");
+    syncData[product.id] = { ig_post_id: publish.data.id, updated_at: new Date().toISOString() };
+    await fs.writeJSON(SYNC_FILE, syncData, { spaces: 2 });
   } catch (err) {
-    console.error(`[❌] فشل نشر المنتج ${product.title}: ${err.response?.data?.error?.message}`);
-    return false;
+    const status = err.response?.status;
+    const detail = err.response?.data?.error || err.message;
+    log("[❌]", `❌ فشل نشر المنتج ${product.title}: (HTTP ${status || "?"})`, "\x1b[31m");
+    console.error(detail);
   }
 }
 
-// 🔁 Sync from Shopify
-async function syncProducts(res = null) {
-  const startTime = Date.now();
-  logLine("[ℹ️] 🔁 بدء المزامنة اليدوية...", res);
+// ==================== Webhook من Shopify ====================
+app.post("/webhook", async (req, res) => {
+  const verified = verifyShopifyHmac(req);
+  if (!verified) return res.status(401).send("Invalid HMAC");
+  const topic = req.headers["x-shopify-topic"];
+  const product = req.body;
 
-  const syncData = await fs.readJson(SYNC_FILE);
-  let newCount = 0;
-  let skipped = 0;
+  log("[ℹ️]", `📦 Received webhook: ${topic}`, "\x1b[36m");
+
+  if (topic === "products/create") {
+    log("[🆕]", `إضافة منتج جديد: ${product.title}`, "\x1b[32m");
+    await publishToInstagram(product);
+  } else if (topic === "products/update") {
+    log("[♻️]", `تم تحديث المنتج: ${product.title}`, "\x1b[33m");
+    await publishToInstagram(product);
+  } else if (topic === "products/delete") {
+    log("[🗑️]", `تم حذف المنتج: ${product.title}`, "\x1b[31m");
+    if (syncData[product.id]) {
+      delete syncData[product.id];
+      await fs.writeJSON(SYNC_FILE, syncData, { spaces: 2 });
+    }
+  }
+
+  res.sendStatus(200);
+});
+
+// ==================== مزامنة يدوية ====================
+app.get("/sync-now", async (req, res) => {
+  log("[ℹ️]", "🔁 بدء المزامنة اليدوية...", "\x1b[36m");
+  let successCount = 0;
 
   try {
-    const shopifyRes = await axios.get(`${SHOP_URL}/admin/api/2025-10/products.json`, {
-      headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN },
-      params: { limit: 50 }
-    });
+    const shopifyRes = await axios.get(
+      `${SHOP_URL}/admin/api/2025-10/products.json?limit=50`,
+      {
+        headers: {
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
     const products = shopifyRes.data.products || [];
-    if (!products.length) {
-      logLine("[⚠️] ⚠️ لم يتم العثور على منتجات.", res);
+    if (products.length === 0) {
+      log("[⚠️]", "⚠️ لم يتم العثور على منتجات.", "\x1b[33m");
+      res.send("⚠️ لم يتم العثور على منتجات.");
       return;
     }
 
     for (const product of products) {
-      if (syncData.posts[product.id]) {
-        skipped++;
-        continue;
-      }
-      const ok = await publishToInstagram(product);
-      if (ok) {
-        newCount++;
-        syncData.posts[product.id] = { title: product.title, time: new Date().toISOString() };
-        await fs.writeJson(SYNC_FILE, syncData, { spaces: 2 });
-      }
+      await publishToInstagram(product);
+      successCount++;
     }
 
-    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-    logLine(`\n[📊] تمت المزامنة بنجاح — تم نشر ${newCount} منتجات جديدة وتخطي ${skipped} منتجات.`, res);
-    logLine(`[⏱] استغرقت المزامنة ${duration} ثانية.`, res);
-    logLine(`[🧩] إجمالي المنتجات المفحوصة: ${products.length}`, res);
+    log("[✅]", `✅ تمت المزامنة اليدوية بنجاح (${successCount} منتجات).`, "\x1b[32m");
+    res.send(`✅ تمت المزامنة اليدوية بنجاح (${successCount} منتجات).`);
   } catch (err) {
-    console.error("[❌] خطأ أثناء المزامنة:", err.message);
-    if (res) res.write(`[❌] ${err.message}\n`);
+    const status = err.response?.status;
+    const detail = err.response?.data?.errors || err.response?.data || err.message;
+    log("[❌]", `فشل الوصول إلى Shopify (HTTP ${status || "?"}):`, "\x1b[31m");
+    console.error(detail);
+    res.status(500).send(`❌ خطأ: ${JSON.stringify(detail, null, 2)}`);
   }
-
-  if (res) res.end("\n✅ تمت المزامنة اليدوية بنجاح.\n");
-}
-
-// 🌐 Webhooks
-app.post("/webhook/product-create", (req, res) => {
-  if (!verifyShopify(req)) return res.status(401).send("HMAC failed");
-  console.log("[🆕] 📦 منتج جديد تم إنشاؤه.");
-  publishToInstagram(req.body);
-  res.status(200).send("OK");
 });
 
-app.post("/webhook/product-update", (req, res) => {
-  if (!verifyShopify(req)) return res.status(401).send("HMAC failed");
-  console.log("[♻️] 🔄 تم تحديث المنتج.");
-  publishToInstagram(req.body);
-  res.status(200).send("OK");
-});
-
-// 🧹 Deletion hook
-app.post("/webhook/product-delete", async (req, res) => {
-  if (!verifyShopify(req)) return res.status(401).send("HMAC failed");
-  const syncData = await fs.readJson(SYNC_FILE);
-  delete syncData.posts[req.body.id];
-  await fs.writeJson(SYNC_FILE, syncData, { spaces: 2 });
-  console.log(`[🗑️] تم حذف المنتج: ${req.body.id}`);
-  res.status(200).send("Deleted OK");
-});
-
-// 🌍 Manual sync via browser
-app.get("/sync-now", async (req, res) => {
-  res.setHeader("Content-Type", "text/plain; charset=utf-8");
-  syncProducts(res);
-});
-
-// Root
-app.get("/", (_, res) => {
-  res.send("🚀 eSelect Meta Sync v4.3 running — manual sync at /sync-now");
-});
-
-// Start
+// ==================== تشغيل السيرفر ====================
+app.get("/", (_, res) => res.send("🚀 eSelect Meta Sync v4.4 running"));
 app.listen(PORT, () => {
-  console.log(`[✅] ✅ Server running on port ${PORT}`);
-  console.log(`[🌐] Primary URL: https://eselect-meta-sync.onrender.com`);
+  log("[✅]", `✅ Server running on port ${PORT}`, "\x1b[32m");
+  log("[ℹ️]", `🌐 Primary URL: https://eselect-meta-sync.onrender.com`, "\x1b[36m");
 });
