@@ -3,10 +3,10 @@ import axios from "axios";
 import crypto from "crypto";
 import fs from "fs-extra";
 import dotenv from "dotenv";
+import bodyParser from "body-parser";
 
 dotenv.config();
 const app = express();
-app.use(express.json({ limit: "10mb" }));
 
 // ==================== إعداد المتغيرات ====================
 const PORT = process.env.PORT || 3000;
@@ -30,13 +30,30 @@ function log(prefix, message, color = "\x1b[36m") {
   console.log(`${color}${prefix}${reset} ${message}`);
 }
 
-function verifyShopifyHmac(req) {
-  const hmac = req.headers["x-shopify-hmac-sha256"];
-  if (!hmac) return false;
-  const body = JSON.stringify(req.body);
-  const digest = crypto.createHmac("sha256", SHOPIFY_SECRET).update(body).digest("base64");
-  return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmac));
-}
+// ==================== تحقق من HMAC ====================
+app.use(
+  "/webhook",
+  bodyParser.raw({ type: "application/json" }),
+  (req, res, next) => {
+    try {
+      const hmac = req.headers["x-shopify-hmac-sha256"];
+      if (!hmac) return res.status(401).send("Missing HMAC");
+      const digest = crypto
+        .createHmac("sha256", SHOPIFY_SECRET)
+        .update(req.body, "utf8")
+        .digest("base64");
+      if (hmac !== digest) {
+        log("[❌]", "HMAC verification failed", "\x1b[31m");
+        return res.status(401).send("Invalid HMAC");
+      }
+      req.body = JSON.parse(req.body.toString("utf8"));
+      next();
+    } catch (err) {
+      console.error("❌ خطأ في التحقق من HMAC:", err.message);
+      res.status(400).send("Bad request");
+    }
+  }
+);
 
 // ==================== نشر إلى Instagram ====================
 async function publishToInstagram(product) {
@@ -50,7 +67,6 @@ async function publishToInstagram(product) {
       return;
     }
 
-    // تحميل جميع الصور
     const mediaIds = [];
     for (const img of product.images) {
       const createMedia = await axios.post(
@@ -65,7 +81,6 @@ async function publishToInstagram(product) {
       log("[📸]", `تم تجهيز الصورة: ${img.src}`, "\x1b[34m");
     }
 
-    // إنشاء ألبوم إذا أكثر من صورة
     const containerId =
       mediaIds.length === 1
         ? mediaIds[0]
@@ -78,10 +93,8 @@ async function publishToInstagram(product) {
             })
           ).data.id;
 
-    // الانتظار قبل النشر
     await new Promise((r) => setTimeout(r, 3000));
 
-    // نشر الوسائط
     const publish = await axios.post(
       `${META_GRAPH_URL}/${META_IG_ID}/media_publish`,
       {
@@ -91,7 +104,10 @@ async function publishToInstagram(product) {
     );
 
     log("[✅]", `📸 تم نشر المنتج على إنستجرام: ${product.title}`, "\x1b[32m");
-    syncData[product.id] = { ig_post_id: publish.data.id, updated_at: new Date().toISOString() };
+    syncData[product.id] = {
+      ig_post_id: publish.data.id,
+      updated_at: new Date().toISOString(),
+    };
     await fs.writeJSON(SYNC_FILE, syncData, { spaces: 2 });
   } catch (err) {
     const status = err.response?.status;
@@ -101,29 +117,32 @@ async function publishToInstagram(product) {
   }
 }
 
-// ==================== Webhook من Shopify ====================
-app.post("/webhook", async (req, res) => {
-  const verified = verifyShopifyHmac(req);
-  if (!verified) return res.status(401).send("Invalid HMAC");
-  const topic = req.headers["x-shopify-topic"];
+// ==================== Webhooks من Shopify ====================
+
+// إنشاء منتج جديد
+app.post("/webhook/products/create", async (req, res) => {
   const product = req.body;
+  log("[📦]", `🆕 تم إنشاء المنتج: ${product.title}`, "\x1b[32m");
+  await publishToInstagram(product);
+  res.sendStatus(200);
+});
 
-  log("[ℹ️]", `📦 Received webhook: ${topic}`, "\x1b[36m");
+// تحديث منتج
+app.post("/webhook/products/update", async (req, res) => {
+  const product = req.body;
+  log("[♻️]", `تم تحديث المنتج: ${product.title}`, "\x1b[33m");
+  await publishToInstagram(product);
+  res.sendStatus(200);
+});
 
-  if (topic === "products/create") {
-    log("[🆕]", `إضافة منتج جديد: ${product.title}`, "\x1b[32m");
-    await publishToInstagram(product);
-  } else if (topic === "products/update") {
-    log("[♻️]", `تم تحديث المنتج: ${product.title}`, "\x1b[33m");
-    await publishToInstagram(product);
-  } else if (topic === "products/delete") {
-    log("[🗑️]", `تم حذف المنتج: ${product.title}`, "\x1b[31m");
-    if (syncData[product.id]) {
-      delete syncData[product.id];
-      await fs.writeJSON(SYNC_FILE, syncData, { spaces: 2 });
-    }
+// حذف منتج
+app.post("/webhook/products/delete", async (req, res) => {
+  const product = req.body;
+  log("[🗑️]", `تم حذف المنتج: ${product.title}`, "\x1b[31m");
+  if (syncData[product.id]) {
+    delete syncData[product.id];
+    await fs.writeJSON(SYNC_FILE, syncData, { spaces: 2 });
   }
-
   res.sendStatus(200);
 });
 
@@ -146,8 +165,7 @@ app.get("/sync-now", async (req, res) => {
     const products = shopifyRes.data.products || [];
     if (products.length === 0) {
       log("[⚠️]", "⚠️ لم يتم العثور على منتجات.", "\x1b[33m");
-      res.send("⚠️ لم يتم العثور على منتجات.");
-      return;
+      return res.send("⚠️ لم يتم العثور على منتجات.");
     }
 
     for (const product of products) {
@@ -166,8 +184,13 @@ app.get("/sync-now", async (req, res) => {
   }
 });
 
+// ==================== اختبار الاتصال ====================
+app.get("/test", (_, res) => {
+  res.send("✅ Server is alive and listening for Shopify webhooks!");
+});
+
 // ==================== تشغيل السيرفر ====================
-app.get("/", (_, res) => res.send("🚀 eSelect Meta Sync v4.4 running"));
+app.get("/", (_, res) => res.send("🚀 eSelect Meta Sync v5.0 running"));
 app.listen(PORT, () => {
   log("[✅]", `✅ Server running on port ${PORT}`, "\x1b[32m");
   log("[ℹ️]", `🌐 Primary URL: https://eselect-meta-sync.onrender.com`, "\x1b[36m");
