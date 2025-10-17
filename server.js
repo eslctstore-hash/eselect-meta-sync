@@ -88,14 +88,14 @@ ${desc}
     });
     const data = await response.json();
     const caption = cleanText(data.choices[0]?.message?.content || title);
-    return `${caption}\n\nرابط المنتج:\nhttps://eselect.store/products/${handle}`;
+    return `${caption}\n\n🔗 رابط المنتج:\nhttps://eselect.store/products/${handle}`;
   } catch (err) {
     log.error("فشل توليد الوصف التلقائي: " + err.message);
     return `${title}\n\nhttps://eselect.store/products/${handle}`;
   }
 }
 
-// 📸 نشر كألبوم (carousel)
+// 📸 نشر كألبوم Carousel
 async function publishCarouselToInstagram(product) {
   try {
     const { title, body_html, images, handle } = product;
@@ -132,6 +132,9 @@ async function publishCarouselToInstagram(product) {
       return;
     }
 
+    // ✅ تأخير 8 ثوانٍ للسماح للوسائط بالجهوزية
+    await new Promise((resolve) => setTimeout(resolve, 8000));
+
     const containerRes = await fetch(
       `https://graph.facebook.com/v20.0/${igId}/media`,
       {
@@ -146,6 +149,14 @@ async function publishCarouselToInstagram(product) {
       }
     );
     const containerData = await containerRes.json();
+
+    if (!containerData.id) {
+      log.error(`❌ فشل إنشاء ألبوم المنتج ${title}`);
+      return;
+    }
+
+    // ✅ تأخير إضافي بسيط قبل النشر النهائي
+    await new Promise((resolve) => setTimeout(resolve, 5000));
 
     const publishRes = await fetch(
       `https://graph.facebook.com/v20.0/${igId}/media_publish`,
@@ -172,7 +183,7 @@ async function publishCarouselToInstagram(product) {
   }
 }
 
-// 🔁 معالجة المنتجات (إضافة/تحديث/حذف)
+// 🔁 معالجة المنتج (إضافة/تحديث/حذف)
 async function handleProduct(data, type) {
   const title = data.title || "منتج بدون اسم";
   if (type === "create" || type === "update") {
@@ -193,7 +204,7 @@ async function handleProduct(data, type) {
   }
 }
 
-// ✅ Webhooks الصحيحة حسب Shopify
+// ✅ Webhooks
 app.post("/webhook/product-create", async (req, res) => {
   log.info("📦 Received webhook: product-create");
   if (!verifyShopify(req)) return res.status(401).send("Invalid signature");
@@ -218,7 +229,7 @@ app.post("/webhook/product-delete", async (req, res) => {
   res.send("ok");
 });
 
-// ✳️ مزامنة فورية عند الطلب
+// ✳️ مزامنة فورية
 app.get("/sync-now", async (req, res) => {
   log.info("🔁 تنفيذ مزامنة فورية الآن...");
   res.send("✅ تم بدء المزامنة اليدوية الآن، راقب اللوج...");
@@ -257,7 +268,7 @@ setTimeout(periodicSync, 5 * 60 * 1000);
 setInterval(periodicSync, 6 * 60 * 60 * 1000);
 
 app.get("/", (req, res) => {
-  res.send("🚀 eSelect Meta Sync v4.1 — Webhooks Fixed + Carousel Upload");
+  res.send("🚀 eSelect Meta Sync v4.2 — Carousel Publishing Fixed");
 });
 
 app.listen(PORT, () => {
