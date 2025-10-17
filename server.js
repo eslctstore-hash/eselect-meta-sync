@@ -18,7 +18,7 @@ const META_GRAPH_URL = process.env.META_GRAPH_URL || "https://graph.facebook.com
 const META_IG_ID = process.env.META_IG_ID;
 const META_PAGE_ID = process.env.META_PAGE_ID;
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
-const SYNC_TO_FACEBOOK = process.env.SYNC_TO_FACEBOOK === "true"; // ✅ مفتاح التفعيل
+const SYNC_TO_FACEBOOK = process.env.SYNC_TO_FACEBOOK === "true";
 
 const SYNC_FILE = "./sync.json";
 let syncData = {};
@@ -39,7 +39,7 @@ function verifyShopifyHmac(req) {
 }
 
 // ==================== النشر على Meta ====================
-async function publishToMeta(product, isUpdate = false) {
+async function publishToMeta(product) {
   try {
     const caption = `${product.title}\n\n${product.body_html
       ?.replace(/<[^>]*>/g, "")
@@ -51,16 +51,16 @@ async function publishToMeta(product, isUpdate = false) {
     }
 
     const uniqueImages = [...new Set(product.images.map(i => i.src))].slice(0, 10);
-
     log("[⌛]", "⏳ انتظار 10 ثوانٍ قبل النشر...");
     await new Promise(r => setTimeout(r, 10000));
 
     const mediaIds = [];
     for (const img of uniqueImages) {
-      const createMedia = await axios.post(
-        `${META_GRAPH_URL}/${META_IG_ID}/media`,
-        { image_url: img, caption, access_token: META_ACCESS_TOKEN }
-      );
+      const createMedia = await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media`, {
+        image_url: img,
+        caption,
+        access_token: META_ACCESS_TOKEN
+      });
       mediaIds.push(createMedia.data.id);
       log("[📸]", `تم تجهيز الصورة: ${img}`, "\x1b[34m");
     }
@@ -129,55 +129,37 @@ async function deleteFromMeta(productId) {
   await fs.writeJSON(SYNC_FILE, syncData, { spaces: 2 });
 }
 
-// ==================== Webhook من Shopify ====================
-app.post("/webhook", async (req, res) => {
-  const verified = verifyShopifyHmac(req);
-  if (!verified) return res.status(401).send("Invalid HMAC");
-
-  const topic = req.headers["x-shopify-topic"];
+// ==================== Webhooks من Shopify ====================
+// 🆕 إنشاء منتج
+app.post("/webhook/products/create", async (req, res) => {
+  if (!verifyShopifyHmac(req)) return res.status(401).send("Invalid HMAC");
   const product = req.body;
-
-  log("[📦]", `${topic}: ${product.title}`, "\x1b[36m");
-
-  if (["products/create", "products/update"].includes(topic)) {
-    if (product.status === "active") await publishToMeta(product, topic === "products/update");
-    else if (["draft", "archived"].includes(product.status)) await deleteFromMeta(product.id);
-  } else if (topic === "products/delete") {
-    await deleteFromMeta(product.id);
-  }
-
+  log("[🆕]", `تم إنشاء المنتج: ${product.title}`, "\x1b[32m");
+  if (product.status === "active") await publishToMeta(product);
   res.sendStatus(200);
 });
 
-// ==================== مزامنة يدوية ====================
-app.get("/sync-now", async (_, res) => {
-  log("[ℹ️]", "بدء المزامنة اليدوية...", "\x1b[36m");
-  let count = 0;
-  try {
-    const shopifyRes = await axios.get(`${SHOP_URL}/admin/api/2025-10/products.json?status=active&limit=100`, {
-      headers: {
-        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-        "Content-Type": "application/json"
-      }
-    });
+// 🔄 تحديث منتج
+app.post("/webhook/products/update", async (req, res) => {
+  if (!verifyShopifyHmac(req)) return res.status(401).send("Invalid HMAC");
+  const product = req.body;
+  log("[♻️]", `تم تحديث المنتج: ${product.title}`, "\x1b[33m");
+  if (product.status === "active") await publishToMeta(product);
+  else if (["draft", "archived"].includes(product.status)) await deleteFromMeta(product.id);
+  res.sendStatus(200);
+});
 
-    const products = shopifyRes.data.products || [];
-    for (const p of products) {
-      await publishToMeta(p);
-      count++;
-    }
-
-    log("[✅]", `تمت المزامنة اليدوية (${count} منتجات).`, "\x1b[32m");
-    res.send(`✅ تمت المزامنة اليدوية (${count} منتجات).`);
-  } catch (err) {
-    const status = err.response?.status;
-    log("[❌]", `فشل المزامنة (HTTP ${status || "?"})`, "\x1b[31m");
-    res.status(500).send(err.message);
-  }
+// 🗑️ حذف منتج
+app.post("/webhook/products/delete", async (req, res) => {
+  if (!verifyShopifyHmac(req)) return res.status(401).send("Invalid HMAC");
+  const product = req.body;
+  log("[🗑️]", `تم حذف المنتج: ${product.title}`, "\x1b[31m");
+  await deleteFromMeta(product.id);
+  res.sendStatus(200);
 });
 
 // ==================== تشغيل السيرفر ====================
-app.get("/", (_, res) => res.send("🚀 eSelect Meta Sync v4.8 Enterprise Running..."));
+app.get("/", (_, res) => res.send("🚀 eSelect Meta Sync v4.8.1 Webhook Fix Running..."));
 app.listen(PORT, () => {
   log("[✅]", `Server running on port ${PORT}`, "\x1b[32m");
   log("[🌐]", `Primary URL: https://eselect-meta-sync.onrender.com`, "\x1b[36m");
