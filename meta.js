@@ -1,7 +1,7 @@
 // meta.js
 const axios = require('axios');
 const { generateHashtags } = require('./openai');
-const fs = = require('fs');
+const fs = require('fs'); // <== تم التصحيح هنا
 const path = require('path');
 
 // قاعدة البيانات البسيطة
