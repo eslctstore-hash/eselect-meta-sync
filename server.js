@@ -6,7 +6,16 @@ import dotenv from "dotenv";
 
 dotenv.config();
 const app = express();
-app.use(express.json({ limit: "10mb" }));
+
+// ⚙️ نستخدم raw body بدلاً من JSON فقط
+app.use(
+  express.json({
+    limit: "10mb",
+    verify: (req, res, buf) => {
+      req.rawBody = buf; // حفظ النسخة الخام للتحقق من HMAC
+    },
+  })
+);
 
 // ==================== إعداد المتغيرات ====================
 const PORT = process.env.PORT || 3000;
@@ -33,9 +42,12 @@ function log(prefix, message, color = "\x1b[36m") {
 function verifyShopifyHmac(req) {
   const hmac = req.headers["x-shopify-hmac-sha256"];
   if (!hmac) return false;
-  const body = JSON.stringify(req.body);
-  const digest = crypto.createHmac("sha256", SHOPIFY_SECRET).update(body).digest("base64");
-  return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmac));
+  const digest = crypto.createHmac("sha256", SHOPIFY_SECRET).update(req.rawBody).digest("base64");
+  try {
+    return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmac));
+  } catch {
+    return false;
+  }
 }
 
 // ==================== النشر على Meta ====================
@@ -51,6 +63,7 @@ async function publishToMeta(product) {
     }
 
     const uniqueImages = [...new Set(product.images.map(i => i.src))].slice(0, 10);
+
     log("[⌛]", "⏳ انتظار 10 ثوانٍ قبل النشر...");
     await new Promise(r => setTimeout(r, 10000));
 
@@ -130,18 +143,24 @@ async function deleteFromMeta(productId) {
 }
 
 // ==================== Webhooks من Shopify ====================
-// 🆕 إنشاء منتج
 app.post("/webhook/products/create", async (req, res) => {
-  if (!verifyShopifyHmac(req)) return res.status(401).send("Invalid HMAC");
+  const valid = verifyShopifyHmac(req);
+  if (!valid) {
+    log("[⛔]", "HMAC غير صالح (create)", "\x1b[31m");
+    return res.status(401).send("Invalid HMAC");
+  }
   const product = req.body;
   log("[🆕]", `تم إنشاء المنتج: ${product.title}`, "\x1b[32m");
   if (product.status === "active") await publishToMeta(product);
   res.sendStatus(200);
 });
 
-// 🔄 تحديث منتج
 app.post("/webhook/products/update", async (req, res) => {
-  if (!verifyShopifyHmac(req)) return res.status(401).send("Invalid HMAC");
+  const valid = verifyShopifyHmac(req);
+  if (!valid) {
+    log("[⛔]", "HMAC غير صالح (update)", "\x1b[31m");
+    return res.status(401).send("Invalid HMAC");
+  }
   const product = req.body;
   log("[♻️]", `تم تحديث المنتج: ${product.title}`, "\x1b[33m");
   if (product.status === "active") await publishToMeta(product);
@@ -149,9 +168,12 @@ app.post("/webhook/products/update", async (req, res) => {
   res.sendStatus(200);
 });
 
-// 🗑️ حذف منتج
 app.post("/webhook/products/delete", async (req, res) => {
-  if (!verifyShopifyHmac(req)) return res.status(401).send("Invalid HMAC");
+  const valid = verifyShopifyHmac(req);
+  if (!valid) {
+    log("[⛔]", "HMAC غير صالح (delete)", "\x1b[31m");
+    return res.status(401).send("Invalid HMAC");
+  }
   const product = req.body;
   log("[🗑️]", `تم حذف المنتج: ${product.title}`, "\x1b[31m");
   await deleteFromMeta(product.id);
@@ -159,7 +181,7 @@ app.post("/webhook/products/delete", async (req, res) => {
 });
 
 // ==================== تشغيل السيرفر ====================
-app.get("/", (_, res) => res.send("🚀 eSelect Meta Sync v4.8.1 Webhook Fix Running..."));
+app.get("/", (_, res) => res.send("🚀 eSelect Meta Sync v4.8.2 Stable (Raw Body Fix) Running..."));
 app.listen(PORT, () => {
   log("[✅]", `Server running on port ${PORT}`, "\x1b[32m");
   log("[🌐]", `Primary URL: https://eselect-meta-sync.onrender.com`, "\x1b[36m");
