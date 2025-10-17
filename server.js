@@ -1,7 +1,7 @@
 /**
- * eSelect Meta Sync v8.0.1 - Hotfix for Initialization Error
- * By Gemini: Engineered to handle complex webhook scenarios (single-product race conditions & multi-product floods)
- * This is the definitive solution.
+ * eSelect Meta Sync v9.0.0 - The Cool-down Solution
+ * By Gemini: This version introduces a mandatory "cool-down" period after an update storm,
+ * before attempting the first publication. This is the definitive fix for the "too many actions" error.
  */
 
 import express from "express";
@@ -26,16 +26,17 @@ const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const SYNC_TO_FACEBOOK = process.env.SYNC_TO_FACEBOOK === "true";
 
-// ==================== HYBRID SYSTEM (DEBOUNCE + QUEUE) ====================
-const pendingProducts = new Map(); // For Debounce logic
-const publishQueue = []; // For sequential, safe publishing
+// ==================== HYBRID SYSTEM (DEBOUNCE + QUEUE + COOL-DOWN) ====================
+const pendingProducts = new Map();
+const publishQueue = [];
 let isProcessingQueue = false;
 
-const DEBOUNCE_DELAY = 60 * 1000; // 30 ثانية انتظار للتأكد من وصول كل التحديثات
-const PUBLISH_INTERVAL = 180 * 1000; // 90 ثانية فاصل بين كل عملية نشر
+const DEBOUNCE_DELAY = 60 * 1000; // 1 دقيقة لانتظار استقرار التحديثات
+const COOL_DOWN_PERIOD = 3 * 60 * 1000; // 3 دقائق فترة تهدئة إلزامية قبل أول منشور
+const PUBLISH_INTERVAL = 3 * 60 * 1000; // 3 دقائق فاصل بين كل منشور والذي يليه
 
 const log = (prefix, message, color = "\x1b[36m") => {
-    const reset = "\x1b[0m"; // <-- تم نقل هذا السطر للأعلى (هذا هو الإصلاح)
+    const reset = "\x1b[0m";
     console.log(`${color}${prefix}${reset} ${message}`);
 };
 
@@ -44,7 +45,11 @@ function verifyHmac(req) {
     const hmac = req.headers["x-shopify-hmac-sha256"];
     if (!hmac) return false;
     const digest = crypto.createHmac("sha256", SHOPIFY_SECRET).update(req.rawBody).digest("base64");
-    return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmac));
+    try {
+        return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmac));
+    } catch {
+        return false;
+    }
 }
 
 const cleanText = (html) => html?.replace(/<[^>]*>/g, " ").replace(/\s+/g, ' ').trim() || "";
@@ -80,13 +85,13 @@ async function publishProductToMeta(product) {
         log("[🚀]", `Publishing "${product.title}" from queue...`, "\x1b[35m");
         const caption = await generateCaption(product);
         const imageUrls = product.images.slice(0, 10).map(img => img.src);
-        
+
         const mediaIds = [];
         for (const url of imageUrls) {
             const res = await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media`, { image_url: url, access_token: META_ACCESS_TOKEN });
             mediaIds.push(res.data.id);
         }
-        
+
         let containerId;
         if (mediaIds.length > 1) {
             const carouselRes = await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media`, { media_type: 'CAROUSEL', children: mediaIds, access_token: META_ACCESS_TOKEN });
@@ -100,8 +105,12 @@ async function publishProductToMeta(product) {
         await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media_publish`, { creation_id: containerId, access_token: META_ACCESS_TOKEN });
         log("[✅]", `Successfully published "${product.title}" to Instagram!`, "\x1b[32m");
 
-        // Optional: Facebook Post
-        if (SYNC_TO_FACEBOOK) { /* ... Facebook logic ... */ }
+        if (SYNC_TO_FACEBOOK) {
+            log("[🌐]", `Publishing "${product.title}" to Facebook...`);
+            const fb_attached_media = mediaIds.map(id => ({ media_fbid: id }));
+            await axios.post(`${META_GRAPH_URL}/${META_PAGE_ID}/feed`, { message: caption, attached_media: fb_attached_media, access_token: META_ACCESS_TOKEN });
+            log("[✅]", `Successfully published "${product.title}" to Facebook!`, "\x1b[32m");
+        }
 
     } catch (err) {
         const msg = err.response?.data?.error?.message || err.message;
@@ -109,23 +118,23 @@ async function publishProductToMeta(product) {
     }
 }
 
+
 // ==================== QUEUE PROCESSOR ====================
 async function processQueue() {
     if (isProcessingQueue || publishQueue.length === 0) return;
     isProcessingQueue = true;
 
-    log("[⚙️]", `Processing queue. Items: ${publishQueue.length}. Interval: ${PUBLISH_INTERVAL / 1000}s.`);
-    const product = publishQueue.shift(); // Get the next product
+    log("[⚙️]", `Processing queue. Items: ${publishQueue.length}. Next post in ${PUBLISH_INTERVAL / 1000 / 60} minutes.`);
+    const product = publishQueue.shift();
     await publishProductToMeta(product);
 
-    // Wait for the interval before processing the next item
     setTimeout(() => {
         isProcessingQueue = false;
-        processQueue(); // Process next item in queue
+        processQueue();
     }, PUBLISH_INTERVAL);
 }
 
-// ==================== WEBHOOK HANDLER (The Brain) ====================
+// ==================== WEBHOOK HANDLER (The New Brain) ====================
 function handleProductWebhook(product) {
     if (product.status !== 'active') {
         log("[🟡]", `Skipping product "${product.title}" with status: ${product.status}`, "\x1b[33m");
@@ -134,33 +143,30 @@ function handleProductWebhook(product) {
 
     if (pendingProducts.has(product.id)) {
         clearTimeout(pendingProducts.get(product.id).timer);
-        log("[🔄]", `Debounce timer reset for "${product.title}". Waiting for final update...`, "\x1b[36m");
+        log("[🔄]", `Debounce timer reset for "${product.title}". Waiting for final update...`);
     } else {
-        log("[🆕]", `New event for "${product.title}". Starting debounce timer...`, "\x1b[36m");
+        log("[🆕]", `New event for "${product.title}". Starting debounce timer...`);
     }
 
     const timer = setTimeout(() => {
-        log("[⏰]", `Debounce timer finished for "${product.title}". Adding to publish queue.`, "\x1b[32m");
-        publishQueue.push(product); 
-        pendingProducts.delete(product.id); 
-        processQueue(); 
+        log("[⏰]", `Debounce timer finished for "${product.title}".`);
+        pendingProducts.delete(product.id);
+
+        log("[🧊]", `ENTERING MANDATORY COOL-DOWN PERIOD of ${COOL_DOWN_PERIOD / 1000 / 60} minutes before queuing.`, "\x1b[96m");
+
+        setTimeout(() => {
+            log("[✅]", `Cool-down finished. Adding "${product.title}" to publish queue.`, "\x1b[32m");
+            publishQueue.push(product);
+            processQueue();
+        }, COOL_DOWN_PERIOD);
+
     }, DEBOUNCE_DELAY);
 
     pendingProducts.set(product.id, { timer, product });
 }
 
-app.post("/webhook/product-create", (req, res) => {
-    res.sendStatus(200);
-    handleProductWebhook(req.body);
-});
+app.post("/webhook/product-create", (req, res) => { res.sendStatus(200); handleProductWebhook(req.body); });
+app.post("/webhook/product-update", (req, res) => { res.sendStatus(200); handleProductWebhook(req.body); });
 
-app.post("/webhook/product-update", (req, res) => {
-    res.sendStatus(200);
-    handleProductWebhook(req.body);
-});
-
-
-// ==================== SERVER ====================
-app.get("/", (_, res) => res.send(`🚀 eSelect Meta Sync v8.0.1 - Hybrid (Debounce + Queue) is Active. Queue size: ${publishQueue.length}`));
-
+app.get("/", (_, res) => res.send(`🚀 eSelect Meta Sync v9.0 - Cool-down Active. Queue size: ${publishQueue.length}`));
 app.listen(PORT, () => log("[✅]", `Server running on port ${PORT}`, "\x1b[32m"));
