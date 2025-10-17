@@ -1,7 +1,7 @@
 {
   "name": "eselect-meta-sync",
-  "version": "4.8.0",
-  "description": "Ultimate automatic synchronization of Shopify products with Instagram & Facebook via Meta Graph API.",
+  "version": "6.0.0",
+  "description": "Robust automatic synchronization of Shopify products with Instagram & Facebook via Meta Graph API.",
   "main": "server.js",
   "type": "module",
   "scripts": {
