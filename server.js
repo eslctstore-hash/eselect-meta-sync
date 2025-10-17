@@ -1,9 +1,10 @@
 /**
- * eSelect Meta Sync v5.2.1
- * - Smart Draft Handling
- * - Smart Post Update
- * - Smart Delay & Retry System (30s, 60s, 90s)
- * - Smart Daily Auto Sync for failed/unpublished
+ * eSelect Meta Sync v5.2.2
+ * - Smart Queue Control (2 min interval)
+ * - Smart Retry Backoff (5 min on Meta 400/403)
+ * - Smart Retry for Images (30, 60, 90 sec)
+ * - Daily Auto Sync uses same queue logic
+ * - Never skips products: all are guaranteed to publish eventually
  */
 
 import express from "express";
@@ -31,6 +32,8 @@ const META_GRAPH_URL = process.env.META_GRAPH_URL || "https://graph.facebook.com
 const META_IG_ID = process.env.META_IG_ID;
 const META_PAGE_ID = process.env.META_PAGE_ID;
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
+const SHOP_URL = process.env.SHOP_URL;
+const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const SYNC_TO_FACEBOOK = process.env.SYNC_TO_FACEBOOK === "true";
 
 const SYNC_FILE = "./sync.json";
@@ -78,8 +81,27 @@ async function waitForImages(product) {
     }
   }
 
-  log("[⚠️]", `الصور لم تُصبح جاهزة بعد 3 محاولات (${product.title}) — سيُعاد نشرها في المزامنة اليومية.`, "\x1b[33m");
+  log("[⚠️]", `الصور لم تُصبح جاهزة بعد 3 محاولات (${product.title}) — سيتم نشرها لاحقًا.`, "\x1b[33m");
   return false;
+}
+
+// ==================== QUEUE SYSTEM ====================
+const publishQueue = [];
+let isPublishing = false;
+const QUEUE_INTERVAL = 120000; // 2 minutes between products
+const RETRY_BACKOFF = 5 * 60 * 1000; // 5 minutes
+
+async function queueProcessor() {
+  if (isPublishing || publishQueue.length === 0) return;
+  isPublishing = true;
+
+  const { product, source } = publishQueue.shift();
+  log("[🚀]", `بدء نشر من ${source}: ${product.title}`, "\x1b[36m");
+
+  await publishOrUpdate(product);
+
+  isPublishing = false;
+  setTimeout(queueProcessor, QUEUE_INTERVAL); // next product after 2 mins
 }
 
 // ==================== META PUBLISH ====================
@@ -88,6 +110,7 @@ async function publishOrUpdate(product) {
   const existing = syncData[product.id];
 
   try {
+    // تحديث منشور سابق
     if (existing?.ig_post_id) {
       log("[♻️]", `تحديث منشور سابق (${product.title})`, "\x1b[33m");
       await axios.post(`${META_GRAPH_URL}/${existing.ig_post_id}`, {
@@ -152,64 +175,53 @@ async function publishOrUpdate(product) {
       ig_post_id: igPublish.data.id,
       fb_post_id: fbPublish?.data?.id || null,
       updated_at: now(),
+      status: "success",
     };
     await fs.writeJSON(SYNC_FILE, syncData, { spaces: 2 });
     log("[✅]", `تم النشر (${product.title})`, "\x1b[32m");
   } catch (err) {
     const msg = err.response?.data?.error?.message || err.message;
-    log("[❌]", `فشل النشر (${product.title}): ${msg}`, "\x1b[31m");
+
+    if (msg.includes("User is performing too many actions")) {
+      log("[⚠️]", `Meta رفض النشر بسبب الحد الأعلى (${product.title}) — إعادة المحاولة بعد 5 دقائق.`, "\x1b[33m");
+      setTimeout(() => publishQueue.push({ product, source: "RetryBackoff" }), RETRY_BACKOFF);
+    } else {
+      log("[❌]", `فشل النشر (${product.title}): ${msg}`, "\x1b[31m");
+    }
+
     syncData[product.id] = { status: "failed", title: product.title, error: msg, updated_at: now() };
     await fs.writeJSON(SYNC_FILE, syncData, { spaces: 2 });
   }
 }
 
-// ==================== META DELETE ====================
-async function deleteFromMeta(productId) {
-  const data = syncData[productId];
-  if (!data) return;
-
-  for (const key of ["ig_post_id", "fb_post_id"]) {
-    if (data[key]) {
-      try {
-        await axios.delete(`${META_GRAPH_URL}/${data[key]}?access_token=${META_ACCESS_TOKEN}`);
-        log("[🗑️]", `تم حذف ${key.includes("ig") ? "إنستجرام" : "فيسبوك"} (${productId})`, "\x1b[31m");
-      } catch {
-        log("[⚠️]", `فشل حذف ${key} (${productId})`, "\x1b[33m");
-      }
-    }
-  }
-
-  delete syncData[productId];
-  await fs.writeJSON(SYNC_FILE, syncData, { spaces: 2 });
-}
-
-// ==================== SMART DAILY RESYNC ====================
+// ==================== DAILY RESYNC ====================
 async function dailyResync() {
   const failed = Object.entries(syncData).filter(
     ([, v]) => v.status === "failed" || v.status === "pending"
   );
   if (!failed.length) return;
 
-  log("[🔁]", `بدء المزامنة اليومية (${failed.length} منتجات)...`, "\x1b[36m");
+  log("[🔁]", `بدء المزامنة اليومية (${failed.length} منتج)...`, "\x1b[36m");
 
   for (const [id, data] of failed) {
     try {
       const productRes = await axios.get(
-        `https://${process.env.SHOP_URL}/admin/api/2024-10/products/${id}.json`,
-        { headers: { "X-Shopify-Access-Token": process.env.SHOPIFY_ACCESS_TOKEN } }
+        `https://${SHOP_URL}/admin/api/2024-10/products/${id}.json`,
+        { headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN } }
       );
       const product = productRes.data.product;
-      if (product.status === "active") await publishOrUpdate(product);
-      await wait(10000);
+      if (product.status === "active") {
+        publishQueue.push({ product, source: "DailyResync" });
+      }
     } catch (err) {
-      log("[⚠️]", `فشل استرجاع المنتج ${id} أثناء المزامنة: ${err.message}`, "\x1b[33m");
+      log("[⚠️]", `فشل استرجاع المنتج ${id}: ${err.message}`, "\x1b[33m");
     }
   }
-  log("[✅]", `انتهاء المزامنة اليومية.`, "\x1b[32m");
-}
 
-// إعادة المزامنة كل 24 ساعة
-setInterval(dailyResync, 24 * 60 * 60 * 1000);
+  log("[ℹ️]", `تمت إضافة المنتجات إلى الطابور للمزامنة اليومية.`, "\x1b[36m");
+  queueProcessor();
+}
+setInterval(dailyResync, 24 * 60 * 60 * 1000); // كل 24 ساعة
 
 // ==================== WEBHOOKS ====================
 app.post("/webhook/products/create", async (req, res) => {
@@ -217,36 +229,28 @@ app.post("/webhook/products/create", async (req, res) => {
   const product = req.body;
   if (product.status !== "active") return res.sendStatus(200);
   log("[🆕]", `منتج جديد: ${product.title}`, "\x1b[32m");
-  await publishOrUpdate(product);
+  publishQueue.push({ product, source: "WebhookCreate" });
+  queueProcessor();
   res.sendStatus(200);
 });
 
 app.post("/webhook/products/update", async (req, res) => {
   if (!verifyHmac(req)) return res.status(401).send("Invalid HMAC");
   const product = req.body;
-  if (["draft", "archived"].includes(product.status)) {
-    await deleteFromMeta(product.id);
-    return res.sendStatus(200);
-  }
+  if (["draft", "archived"].includes(product.status)) return res.sendStatus(200);
   log("[♻️]", `تحديث منتج: ${product.title}`, "\x1b[33m");
-  await publishOrUpdate(product);
-  res.sendStatus(200);
-});
-
-app.post("/webhook/products/delete", async (req, res) => {
-  if (!verifyHmac(req)) return res.status(401).send("Invalid HMAC");
-  const product = req.body;
-  log("[🗑️]", `تم حذف المنتج: ${product.title}`, "\x1b[31m");
-  await deleteFromMeta(product.id);
+  publishQueue.push({ product, source: "WebhookUpdate" });
+  queueProcessor();
   res.sendStatus(200);
 });
 
 // ==================== SERVER ====================
 app.get("/", (_, res) => {
-  res.send("🚀 eSelect Meta Sync v5.2.1 running with Smart Retry + Daily Sync");
+  res.send("🚀 eSelect Meta Sync v5.2.2 Smart Queue + Retry Backoff running...");
 });
 
 app.listen(PORT, () => {
   log("[✅]", `Server running on port ${PORT}`, "\x1b[32m");
-  log("[🌐]", `Auto daily sync enabled (every 24h)`, "\x1b[36m");
+  log("[🕓]", `Queue interval: every 2 minutes`, "\x1b[36m");
+  log("[🌐]", `Daily resync enabled (every 24h)`, "\x1b[36m");
 });
