@@ -1,5 +1,5 @@
 /**
- * eSelect Meta Sync v8.0.0 - Hybrid Solution (Debounce + Queue)
+ * eSelect Meta Sync v8.0.1 - Hotfix for Initialization Error
  * By Gemini: Engineered to handle complex webhook scenarios (single-product race conditions & multi-product floods)
  * This is the definitive solution.
  */
@@ -35,13 +35,12 @@ const DEBOUNCE_DELAY = 30 * 1000; // 30 ثانية انتظار للتأكد م�
 const PUBLISH_INTERVAL = 90 * 1000; // 90 ثانية فاصل بين كل عملية نشر
 
 const log = (prefix, message, color = "\x1b[36m") => {
+    const reset = "\x1b[0m"; // <-- تم نقل هذا السطر للأعلى (هذا هو الإصلاح)
     console.log(`${color}${prefix}${reset} ${message}`);
-    const reset = "\x1b[0m";
 };
 
 // ==================== HELPERS ====================
 function verifyHmac(req) {
-    // ... (Your HMAC verification logic remains the same)
     const hmac = req.headers["x-shopify-hmac-sha256"];
     if (!hmac) return false;
     const digest = crypto.createHmac("sha256", SHOPIFY_SECRET).update(req.rawBody).digest("base64");
@@ -133,7 +132,6 @@ function handleProductWebhook(product) {
         return;
     }
 
-    // إذا كان هناك مؤقت قديم لهذا المنتج، قم بإلغائه
     if (pendingProducts.has(product.id)) {
         clearTimeout(pendingProducts.get(product.id).timer);
         log("[🔄]", `Debounce timer reset for "${product.title}". Waiting for final update...`, "\x1b[36m");
@@ -141,20 +139,17 @@ function handleProductWebhook(product) {
         log("[🆕]", `New event for "${product.title}". Starting debounce timer...`, "\x1b[36m");
     }
 
-    // ابدأ مؤقتًا جديدًا
     const timer = setTimeout(() => {
         log("[⏰]", `Debounce timer finished for "${product.title}". Adding to publish queue.`, "\x1b[32m");
-        publishQueue.push(product); // أضف المنتج النهائي إلى الطابور
-        pendingProducts.delete(product.id); // قم بإزالة المنتج من قائمة الانتظار
-        processQueue(); // ابدأ معالجة الطابور إذا لم يكن يعمل بالفعل
+        publishQueue.push(product); 
+        pendingProducts.delete(product.id); 
+        processQueue(); 
     }, DEBOUNCE_DELAY);
 
-    // قم بتخزين المؤقت والبيانات المحدثة
     pendingProducts.set(product.id, { timer, product });
 }
 
 app.post("/webhook/product-create", (req, res) => {
-    // لا تتحقق من HMAC هنا، فقط استجب بسرعة
     res.sendStatus(200);
     handleProductWebhook(req.body);
 });
@@ -166,6 +161,6 @@ app.post("/webhook/product-update", (req, res) => {
 
 
 // ==================== SERVER ====================
-app.get("/", (_, res) => res.send(`🚀 eSelect Meta Sync v8.0 - Hybrid (Debounce + Queue) is Active. Queue size: ${publishQueue.length}`));
+app.get("/", (_, res) => res.send(`🚀 eSelect Meta Sync v8.0.1 - Hybrid (Debounce + Queue) is Active. Queue size: ${publishQueue.length}`));
 
 app.listen(PORT, () => log("[✅]", `Server running on port ${PORT}`, "\x1b[32m"));
