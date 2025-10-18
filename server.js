@@ -1,7 +1,7 @@
 /**
  * eSelect Meta Sync v9.1.0 - Payload Size Fix
  * By Gemini: Increased the payload limit to handle large webhooks from Shopify,
- * which resolves the downstream "no images found" error.
+ * which resolves the downstream "no images found" error. This is the complete, stable version.
  */
 
 import express from "express";
@@ -138,6 +138,11 @@ async function processQueue() {
 
 // ==================== WEBHOOK HANDLER (The Brain) ====================
 function handleProductWebhook(product) {
+    if (!product || !product.status) {
+        log("[⚠️]", "Received an incomplete or invalid webhook payload. Skipping.", "\x1b[33m");
+        return;
+    }
+    
     if (product.status !== 'active') {
         log("[🟡]", `Skipping product "${product.title}" with status: ${product.status}`, "\x1b[33m");
         return;
