@@ -1,22 +1,26 @@
 // server.js
 require('dotenv').config();
 const express = require('express');
-const { productCreateWebhookHandler } = require('./shopify');
+const { 
+    productCreateWebhookHandler,
+    productUpdateWebhookHandler, // جديد
+    productDeleteWebhookHandler  // جديد
+} = require('./shopify');
 const { scheduleDailySync } = require('./sync');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// رسالة ترحيبية بسيطة
 app.get('/', (req, res) => {
     res.send('Shopify to Meta Publisher is running!');
 });
 
-// !! مهم: تعريف مسار الـ Webhook الخام أولاً !!
-// هذا يضمن أن هذا المسار بالذات لن يتم تحليله كـ JSON تلقائيًا
+// تعريف مسارات الـ Webhook الخام أولاً
 app.post('/webhooks/products/create', express.raw({ type: 'application/json' }), productCreateWebhookHandler);
+app.post('/webhooks/products/update', express.raw({ type: 'application/json' }), productUpdateWebhookHandler); // جديد
+app.post('/webhooks/products/delete', express.raw({ type: 'application/json' }), productDeleteWebhookHandler); // جديد
 
-// الآن، قم بتطبيق محلل JSON العام لباقي المسارات المحتملة
+// تطبيق محلل JSON العام لباقي المسارات
 app.use(express.json());
 
 // بدء المزامنة اليومية
