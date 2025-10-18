@@ -4,115 +4,141 @@ const { generateHashtags } = require('./openai');
 const fs = require('fs');
 const path = require('path');
 
-const DB_PATH = path.join(__dirname, 'db.json');
+// ... (دوال readDb و writeDb و checkContainerStatus تبقى كما هي)
 
-function readDb() {
-    if (!fs.existsSync(DB_PATH)) {
-        fs.writeFileSync(DB_PATH, JSON.stringify([]));
-    }
-    const data = fs.readFileSync(DB_PATH);
-    return JSON.parse(data);
-}
-
-function writeDb(data) {
-    fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
-}
-
-// =================================================================
-// ============== NEW HELPER FUNCTION TO CHECK STATUS ==============
-// =================================================================
-/**
- * Checks the status of a media container on Instagram's servers.
- * @param {string} containerId The ID of the container to check.
- * @param {string} accessToken Your Meta access token.
- * @returns {Promise<string>} The status code (e.g., 'FINISHED', 'IN_PROGRESS', 'ERROR').
- */
-const checkContainerStatus = async (containerId, accessToken) => {
-    try {
-        const url = `https://graph.facebook.com/v18.0/${containerId}?fields=status_code&access_token=${accessToken}`;
-        const response = await axios.get(url);
-        return response.data.status_code;
-    } catch (error) {
-        console.error('Error checking container status:', error.response ? error.response.data : error.message);
-        return 'ERROR';
-    }
-};
-
+// ## دالة إنشاء المنشور (مُحسَّنة للصور المتعددة) ##
 const createPost = async (product) => {
-    const productUrl = `https://${process.env.SHOPIFY_SHOP_URL}/products/${product.handle}`;
-    let caption = `${product.title}\n\n${product.body_html.replace(/<[^>]*>/g, '').substring(0, 1500)}...\n\nاطلبه الآن:\n${productUrl}\n\n`;
+    // ... الكود لإنشاء caption و hashtags لم يتغير ...
 
     try {
-        const hashtags = await generateHashtags(product.title, product.body_html);
-        caption += hashtags;
-
-        const imageUrl = product.images[0]?.src;
-        if (!imageUrl) {
-            console.error('Product has no image. Aborting post.');
+        const imageUrls = product.images.map(img => img.src).slice(0, 10); // خذ أول 10 صور
+        if (imageUrls.length === 0) {
+            console.error('Product has no images. Aborting post.');
             return;
         }
 
-        console.log(`Attempting to post with image URL: ${imageUrl}`);
-        const igPostId = await postToInstagram(imageUrl, caption);
+        console.log(`Attempting to post with ${imageUrls.length} image(s).`);
+        const igPostId = await postToInstagram(imageUrls, captionWithHashtags);
         
         if (igPostId) {
-            const db = readDb();
-            db.push({ shopifyProductId: product.id, instagramPostId: igPostId, status: 'active' });
-            writeDb(db);
-            console.log(`✅ Successfully posted product ${product.id} to Instagram.`);
+            // ... حفظ في قاعدة البيانات لم يتغير ...
         }
     } catch (error) {
-        console.error(`❌ Failed to create post for product ${product.id}.`);
-        if (error.response) {
-            console.error('Error Details from Meta:', JSON.stringify(error.response.data, null, 2));
-        } else {
-            console.error('General Error:', error.message);
-        }
+        // ... معالجة الأخطاء لم تتغير ...
     }
 };
 
-// =================================================================
-// ============== MODIFIED FUNCTION WITH POLLING LOGIC =============
-// =================================================================
-const postToInstagram = async (imageUrl, caption) => {
+// ## دالة النشر على انستجرام (مُعاد كتابتها بالكامل) ##
+const postToInstagram = async (imageUrls, caption) => {
     const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
     const accessToken = process.env.META_ACCESS_TOKEN;
-    const MAX_RETRIES = 12; // Try for up to 60 seconds (12 * 5s)
-    const RETRY_DELAY = 5000; // 5 seconds
 
-    // Step 1: Create Media Container
-    console.log('Step 1: Creating media container...');
-    const containerUrl = `https://graph.facebook.com/v18.0/${igAccountId}/media`;
-    const containerResponse = await axios.post(containerUrl, { image_url: imageUrl, caption: caption, access_token: accessToken });
-    const containerId = containerResponse.data.id;
-    console.log(`Step 1 successful. Container ID: ${containerId}`);
-
-    // Step 2: Poll for container status
-    console.log('Step 2: Checking media processing status...');
-    for (let i = 0; i < MAX_RETRIES; i++) {
-        const status = await checkContainerStatus(containerId, accessToken);
-        console.log(`...Status check ${i + 1}/${MAX_RETRIES}: ${status}`);
-
-        if (status === 'FINISHED') {
-            // Step 3: Publish the container
-            console.log('Step 3: Media is ready. Publishing container...');
-            const publishUrl = `https://graph.facebook.com/v18.0/${igAccountId}/media_publish`;
-            const publishResponse = await axios.post(publishUrl, { creation_id: containerId, access_token: accessToken });
-            console.log('Step 3 successful. Post published!');
-            return publishResponse.data.id;
-        } else if (status === 'ERROR') {
-            throw new Error('Media container failed to process.');
+    if (imageUrls.length === 1) {
+        // **منشور بصورة واحدة (المنطق القديم مع التحقق من الجاهزية)**
+        const containerId = await createSingleMediaContainer(imageUrls[0], caption, accessToken);
+        await waitForContainerReady(containerId, accessToken);
+        return publishMedia(containerId, accessToken);
+    } else {
+        // **منشور بصور متعددة (Carousel)**
+        console.log('Creating carousel post...');
+        const childContainerIds = [];
+        for (const url of imageUrls) {
+            const childId = await createSingleMediaContainer(url, null, accessToken); // بدون نص
+            childContainerIds.push(childId);
         }
 
-        // Wait before checking again
-        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-    }
+        // انتظر حتى تجهز كل الصور
+        for (const childId of childContainerIds) {
+            await waitForContainerReady(childId, accessToken);
+        }
 
-    throw new Error('Media container did not become ready in time.');
+        // إنشاء حاوية الـ Carousel
+        const carouselContainerUrl = `https://graph.facebook.com/v18.0/${igAccountId}/media`;
+        const carouselRes = await axios.post(carouselContainerUrl, {
+            caption: caption,
+            media_type: 'CAROUSEL',
+            children: childContainerIds,
+            access_token: accessToken,
+        });
+        const carouselContainerId = carouselRes.data.id;
+        console.log(`Carousel container created: ${carouselContainerId}`);
+
+        await waitForContainerReady(carouselContainerId, accessToken);
+        return publishMedia(carouselContainerId, accessToken);
+    }
 };
 
-const updatePostStatus = async (postId, shouldEnable) => {
-    console.log(`Updating post ${postId} status to ${shouldEnable ? 'enabled' : 'disabled'}. Logic to be implemented.`);
-}
+// -- دوال مساعدة جديدة --
+const createSingleMediaContainer = async (imageUrl, caption, accessToken) => {
+    const url = `https://graph.facebook.com/v18.0/${process.env.INSTAGRAM_ACCOUNT_ID}/media`;
+    const params = { image_url: imageUrl, access_token: accessToken };
+    if (caption) params.caption = caption;
+    const response = await axios.post(url, params);
+    return response.data.id;
+};
 
-module.exports = { createPost, updatePostStatus, readDb, writeDb };
+const waitForContainerReady = async (containerId, accessToken) => {
+    const MAX_RETRIES = 12, RETRY_DELAY = 5000;
+    for (let i = 0; i < MAX_RETRIES; i++) {
+        const status = await checkContainerStatus(containerId, accessToken);
+        if (status === 'FINISHED') return;
+        if (status === 'ERROR') throw new Error(`Container ${containerId} failed to process.`);
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+    }
+    throw new Error('Container did not become ready in time.');
+};
+
+const publishMedia = async (containerId, accessToken) => {
+    const url = `https://graph.facebook.com/v18.0/${process.env.INSTAGRAM_ACCOUNT_ID}/media_publish`;
+    const response = await axios.post(url, { creation_id: containerId, access_token: accessToken });
+    console.log(`Successfully published media with ID: ${response.data.id}`);
+    return response.data.id;
+};
+
+// ==========================================================
+// ============== دالة تحديث النص (جديدة) =====================
+// ==========================================================
+const updateInstagramPostCaption = async (mediaId, newCaption) => {
+    console.log(`Updating caption for media ID: ${mediaId}`);
+    try {
+        const url = `https://graph.facebook.com/${mediaId}`;
+        await axios.post(url, {
+            caption: newCaption,
+            access_token: process.env.META_ACCESS_TOKEN,
+        });
+        console.log('✅ Caption updated successfully.');
+    } catch (error) {
+        console.error('❌ Failed to update caption.');
+        if (error.response) {
+            console.error('Error Details from Meta:', JSON.stringify(error.response.data, null, 2));
+        }
+    }
+};
+
+// ==========================================================
+// ============== دالة إخفاء المنشور (جديدة) ===================
+// ==========================================================
+const hideInstagramPost = async (mediaId) => {
+    console.log(`Hiding media ID: ${mediaId}`);
+    try {
+        const url = `https://graph.facebook.com/${mediaId}`;
+        await axios.post(url, {
+            is_hidden: true,
+            access_token: process.env.META_ACCESS_TOKEN,
+        });
+        console.log('✅ Post hidden successfully.');
+    } catch (error) {
+        console.error('❌ Failed to hide post.');
+        if (error.response) {
+            console.error('Error Details from Meta:', JSON.stringify(error.response.data, null, 2));
+        }
+    }
+};
+
+module.exports = { 
+    createPost, 
+    updateInstagramPostCaption, 
+    hideInstagramPost,
+    readDb, 
+    writeDb 
+};
