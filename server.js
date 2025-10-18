@@ -1,7 +1,8 @@
 /**
- * eSelect Meta Sync v9.6.0 - Syntax Hotfix
- * By Gemini: Corrected a syntax error in the setTimeout arrow functions
- * that was causing the server to crash on startup.
+ * eSelect Meta Sync v9.7.0 - The Definitive API Request Fix
+ * By Gemini: Corrected the Axios POST request to send data as URL parameters
+ * instead of a JSON body, which is the required format for Meta's media upload endpoint.
+ * This is the final fix for the "Object with ID 'undefined'" error.
  */
 
 import express from "express";
@@ -95,11 +96,16 @@ async function publishProductToMeta(product) {
         log("[📤]", `Uploading and verifying ${imageUrls.length} media items...`);
         for (const [index, url] of imageUrls.entries()) {
             const isCarousel = imageUrls.length > 1;
-            const uploadRes = await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media`, {
-                image_url: url,
-                is_carousel_item: isCarousel,
-                access_token: META_ACCESS_TOKEN
+
+            // THIS IS THE CRITICAL FIX: Sending data as 'params' instead of a JSON body.
+            const uploadRes = await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media`, null, {
+                params: {
+                    image_url: url,
+                    is_carousel_item: isCarousel,
+                    access_token: META_ACCESS_TOKEN
+                }
             });
+
             const mediaId = uploadRes.data.id;
             if (!mediaId) throw new Error(`Media upload for image ${index + 1} did not return an ID.`);
 
@@ -124,10 +130,12 @@ async function publishProductToMeta(product) {
         // --- STEP 2: Create the final container (WITHOUT caption) ---
         if (imageUrls.length > 1) {
             log("[📦]", "All media items are ready. Creating carousel container...");
-            const carouselRes = await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media`, {
-                media_type: 'CAROUSEL',
-                children: readyMediaIds,
-                access_token: META_ACCESS_TOKEN
+            const carouselRes = await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media`, null, {
+                params: {
+                    media_type: 'CAROUSEL',
+                    children: readyMediaIds.join(','), // Join IDs into a comma-separated string
+                    access_token: META_ACCESS_TOKEN
+                }
             });
             finalContainerId = carouselRes.data.id;
         } else {
@@ -139,10 +147,12 @@ async function publishProductToMeta(product) {
 
         // --- STEP 3: Publish the container WITH the caption ---
         log("[✈️]", `Publishing final container ID: ${finalContainerId}`);
-        await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media_publish`, {
-            creation_id: finalContainerId,
-            caption: caption,
-            access_token: META_ACCESS_TOKEN
+        await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media_publish`, null, {
+            params: {
+                creation_id: finalContainerId,
+                caption: caption,
+                access_token: META_ACCESS_TOKEN
+            }
         });
         log("[✅]", `Successfully published "${product.title}" to Instagram!`, "\x1b[32m");
 
@@ -183,12 +193,12 @@ function handleProductWebhook(product) {
     } else {
         log("[🆕]", `New event for "${product.title}". Starting debounce timer...`);
     }
-    const timer = setTimeout(() => { // <-- FIX: Removed the underscore
+    const timer = setTimeout(() => {
         const latestProductData = pendingProducts.get(product.id)?.product || product;
         log("[⏰]", `Debounce timer finished for "${latestProductData.title}".`);
         pendingProducts.delete(product.id);
         log("[🧊]", `ENTERING MANDATORY COOL-DOWN PERIOD of ${COOL_DOWN_PERIOD / 1000 / 60} minutes before queuing.`, "\x1b[96m");
-        setTimeout(() => { // <-- FIX: Removed the underscore
+        setTimeout(() => {
             log("[✅]", `Cool-down finished. Adding "${latestProductData.title}" to publish queue.`, "\x1b[32m");
             publishQueue.push(latestProductData);
             processQueue();
@@ -201,5 +211,5 @@ function handleProductWebhook(product) {
 app.post("/webhook/product-create", (req, res) => { res.sendStatus(200); handleProductWebhook(req.body); });
 app.post("/webhook/product-update", (req, res) => { res.sendStatus(200); handleProductWebhook(req.body); });
 
-app.get("/", (_, res) => res.send(`🚀 eSelect Meta Sync v9.6 - Syntax Hotfix Active. Queue size: ${publishQueue.length}`));
+app.get("/", (_, res) => res.send(`🚀 eSelect Meta Sync v9.7 - API Request Fix Active. Queue size: ${publishQueue.length}`));
 app.listen(PORT, () => log("[✅]", `Server running on port ${PORT}`, "\x1b[32m"));
