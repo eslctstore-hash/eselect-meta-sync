@@ -1,4 +1,4 @@
-// meta.js (Version with detailed error logging)
+// meta.js
 const axios = require('axios');
 const { generateHashtags } = require('./openai');
 const fs = require('fs');
@@ -46,18 +46,12 @@ const createPost = async (product) => {
             console.log(`✅ Successfully posted product ${product.id} to Instagram.`);
         }
     } catch (error) {
-        // =================================================================
-        // ============== THIS IS THE IMPORTANT CHANGE ==============
-        // =================================================================
         console.error(`❌ Failed to create post for product ${product.id}.`);
         if (error.response) {
-            // If the error is from the API request, print the detailed response from Meta
             console.error('Error Details from Meta:', JSON.stringify(error.response.data, null, 2));
         } else {
-            // Otherwise, print the general error message
             console.error('General Error:', error.message);
         }
-        // =================================================================
     }
 };
 
@@ -65,7 +59,6 @@ const postToInstagram = async (imageUrl, caption) => {
     const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
     const accessToken = process.env.META_ACCESS_TOKEN;
 
-    // Step 1: Create Media Container
     console.log('Step 1: Creating media container...');
     const containerUrl = `https://graph.facebook.com/v18.0/${igAccountId}/media`;
     const containerResponse = await axios.post(containerUrl, {
@@ -76,7 +69,6 @@ const postToInstagram = async (imageUrl, caption) => {
     const containerId = containerResponse.data.id;
     console.log(`Step 1 successful. Container ID: ${containerId}`);
 
-    // Step 2: Publish the container
     console.log('Step 2: Publishing container...');
     const publishUrl = `https://graph.facebook.com/v18.0/${igAccountId}/media_publish`;
     const publishResponse = await axios.post(publishUrl, {
@@ -87,8 +79,6 @@ const postToInstagram = async (imageUrl, caption) => {
 
     return publishResponse.data.id;
 };
-
-// ... (rest of the file remains the same) ...
 
 const updatePostStatus = async (postId, shouldEnable) => {
     console.log(`Updating post ${postId} status to ${shouldEnable ? 'enabled' : 'disabled'}. Logic to be implemented.`);
