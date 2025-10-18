@@ -30,8 +30,11 @@ const verifyShopifyWebhook = (req) => {
     const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
     if (!hmac || !body || !secret) return false;
 
+    // ==========================================
+    // ==============   التصحيح هنا   ==============
+    // ==========================================
     const hash = crypto
-        .createHmac('sha265', secret)
+        .createHmac('sha256', secret) // تم تصحيح sha265 إلى sha256
         .update(body, 'utf8', 'hex')
         .digest('base64');
     
