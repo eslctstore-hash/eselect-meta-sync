@@ -4,7 +4,33 @@ const { generateHashtags } = require('./openai');
 const fs = require('fs');
 const path = require('path');
 
-// ... (دوال readDb, writeDb, checkContainerStatus لم تتغير)
+const DB_PATH = path.join(__dirname, 'db.json');
+
+// ==========================================================
+// ============== الدوال المفقودة - تمت إضافتها ==============
+// ==========================================================
+function readDb() {
+    if (!fs.existsSync(DB_PATH)) {
+        fs.writeFileSync(DB_PATH, JSON.stringify([]));
+    }
+    const data = fs.readFileSync(DB_PATH);
+    return JSON.parse(data);
+}
+
+function writeDb(data) {
+    fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
+}
+
+const checkContainerStatus = async (containerId, accessToken) => {
+    try {
+        const url = `https://graph.facebook.com/v18.0/${containerId}?fields=status_code&access_token=${accessToken}`;
+        const response = await axios.get(url);
+        return response.data.status_code;
+    } catch (error) {
+        return 'ERROR';
+    }
+};
+// ==========================================================
 
 const createPost = async (product) => {
     const productUrl = `https://${process.env.SHOPIFY_SHOP_URL}/products/${product.handle}`;
@@ -24,11 +50,10 @@ const createPost = async (product) => {
         
         if (igPostId) {
             const db = readDb();
-            // !! تعديل مهم: نحفظ اسم المنتج الآن !!
             db.push({ 
                 shopifyProductId: product.id, 
                 instagramPostId: igPostId, 
-                productTitle: product.title, // <-- هذا السطر جديد
+                productTitle: product.title,
                 status: 'active' 
             });
             writeDb(db);
@@ -44,11 +69,66 @@ const createPost = async (product) => {
     }
 };
 
-// ... (دوال postToInstagram, createSingleMediaContainer, waitForContainerReady, publishMedia لم تتغير)
+const postToInstagram = async (imageUrls, caption) => {
+    const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
+    const accessToken = process.env.META_ACCESS_TOKEN;
 
-// ==========================================================
-// ============== دالة تحديث النص (تبقى كما هي) ===============
-// ==========================================================
+    if (imageUrls.length === 1) {
+        const containerId = await createSingleMediaContainer(imageUrls[0], caption, accessToken);
+        await waitForContainerReady(containerId, accessToken);
+        return publishMedia(containerId, accessToken);
+    } else {
+        const childContainerIds = [];
+        for (const url of imageUrls) {
+            const childId = await createSingleMediaContainer(url, null, accessToken);
+            childContainerIds.push(childId);
+        }
+
+        for (const childId of childContainerIds) {
+            await waitForContainerReady(childId, accessToken);
+        }
+
+        const carouselContainerUrl = `https://graph.facebook.com/v18.0/${igAccountId}/media`;
+        const carouselRes = await axios.post(carouselContainerUrl, {
+            caption: caption,
+            media_type: 'CAROUSEL',
+            children: childContainerIds,
+            access_token: accessToken,
+        });
+        const carouselContainerId = carouselRes.data.id;
+        console.log(`Carousel container created: ${carouselContainerId}`);
+
+        await waitForContainerReady(carouselContainerId, accessToken);
+        return publishMedia(carouselContainerId, accessToken);
+    }
+};
+
+const createSingleMediaContainer = async (imageUrl, caption, accessToken) => {
+    const url = `https://graph.facebook.com/v18.0/${process.env.INSTAGRAM_ACCOUNT_ID}/media`;
+    const params = { image_url: imageUrl, access_token: accessToken };
+    if (caption) params.caption = caption;
+    const response = await axios.post(url, params);
+    return response.data.id;
+};
+
+const waitForContainerReady = async (containerId, accessToken) => {
+    const MAX_RETRIES = 12, RETRY_DELAY = 5000;
+    for (let i = 0; i < MAX_RETRIES; i++) {
+        const status = await checkContainerStatus(containerId, accessToken);
+        if (status === 'FINISHED') return;
+        if (status === 'ERROR') throw new Error(`Container ${containerId} failed to process.`);
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+    }
+    throw new Error('Container did not become ready in time.');
+};
+
+const publishMedia = async (containerId, accessToken) => {
+    const url = `https://graph.facebook.com/v18.0/${process.env.INSTAGRAM_ACCOUNT_ID}/media_publish`;
+    const response = await axios.post(url, { creation_id: containerId, access_token: accessToken });
+    console.log(`Successfully published media with ID: ${response.data.id}`);
+    return response.data.id;
+};
+
 const updateInstagramPostCaption = async (mediaId, newCaption) => {
     console.log(`Updating caption for media ID: ${mediaId}`);
     try {
@@ -65,8 +145,6 @@ const updateInstagramPostCaption = async (mediaId, newCaption) => {
         }
     }
 };
-
-// تم حذف دالة hideInstagramPost
 
 module.exports = { 
     createPost, 
