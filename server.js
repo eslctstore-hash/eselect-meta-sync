@@ -1,8 +1,8 @@
 /**
- * eSelect Meta Sync v9.3.0 - The Definitive Polling Fix
- * By Gemini: This version implements a robust polling mechanism to wait for each media asset
- * to be fully processed by Instagram before proceeding. This is the final fix for the
- * "Object with ID 'undefined' does not exist" error.
+ * eSelect Meta Sync v9.4.0 - The Instagram Recipe Fix
+ * By Gemini: This version corrects the publishing flow to match Instagram's strict
+ * API documentation: 1. Upload & Poll, 2. Create Container, 3. Publish with Caption.
+ * This is the definitive fix for the "Object with ID 'undefined'" error.
  */
 
 import express from "express";
@@ -60,7 +60,6 @@ const cleanText = (html) => html?.replace(/<[^>]*>/g, " ").replace(/\s+/g, ' ').
 
 // ==================== AI CAPTION GENERATION ====================
 async function generateCaption(product) {
-    // This function remains unchanged
     if (!OPENAI_API_KEY) {
         log("[⚠️]", "OpenAI API key missing. Using basic caption.", "\x1b[33m");
         return `${product.title}\n\n${cleanText(product.body_html)}`;
@@ -79,7 +78,7 @@ async function generateCaption(product) {
     }
 }
 
-// ==================== CORE PUBLISHING LOGIC (WITH POLLING) ====================
+// ==================== CORE PUBLISHING LOGIC (REBUILT ACCORDING TO DOCS) ====================
 async function publishProductToMeta(product) {
     if (!product.images || product.images.length === 0) {
         log("[⚠️]", `Skipping "${product.title}" - no images found.`, "\x1b[33m");
@@ -93,13 +92,11 @@ async function publishProductToMeta(product) {
         const readyMediaIds = [];
         let finalContainerId;
 
-        // --- Upload and Poll each image ---
+        // --- STEP 1: Upload and Poll each image ---
         log("[📤]", `Uploading and verifying ${imageUrls.length} media items...`);
         for (const [index, url] of imageUrls.entries()) {
-            const isCarousel = imageUrls.length > 1;
             const uploadRes = await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media`, {
                 image_url: url,
-                is_carousel_item: isCarousel,
                 access_token: META_ACCESS_TOKEN
             });
             const mediaId = uploadRes.data.id;
@@ -116,39 +113,34 @@ async function publishProductToMeta(product) {
                     break;
                 }
                 if (statusCode === 'ERROR') throw new Error(`Media item ${index + 1} failed to process.`);
-                await wait(3000); // Wait 3 seconds before checking again
+                await wait(3000);
             }
 
             if (!isReady) throw new Error(`Media item ${index + 1} timed out while processing.`);
             readyMediaIds.push(mediaId);
         }
 
-        // --- Create final container ---
+        // --- STEP 2: Create the final container (WITHOUT caption) ---
         if (imageUrls.length > 1) {
             log("[📦]", "All media items are ready. Creating carousel container...");
             const carouselRes = await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media`, {
                 media_type: 'CAROUSEL',
                 children: readyMediaIds,
-                caption: caption,
                 access_token: META_ACCESS_TOKEN
             });
             finalContainerId = carouselRes.data.id;
         } else {
-            log("[📦]", "Media item is ready. Using its ID as the container...");
-            // For a single image, the container is the media item itself. We just need to add the caption.
-            await axios.post(`${META_GRAPH_URL}/${readyMediaIds[0]}`, {
-                caption: caption,
-                access_token: META_ACCESS_TOKEN
-            });
+            log("[📦]", "Single media item is ready. Using its ID as the container...");
             finalContainerId = readyMediaIds[0];
         }
 
         if (!finalContainerId) throw new Error("Could not create the final media container.");
 
-        // --- Publish final container ---
+        // --- STEP 3: Publish the container WITH the caption ---
         log("[✈️]", `Publishing final container ID: ${finalContainerId}`);
         await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media_publish`, {
             creation_id: finalContainerId,
+            caption: caption, // <-- Caption is added here, at the very end.
             access_token: META_ACCESS_TOKEN
         });
         log("[✅]", `Successfully published "${product.title}" to Instagram!`, "\x1b[32m");
@@ -163,7 +155,6 @@ async function publishProductToMeta(product) {
 
 // ==================== QUEUE PROCESSOR ====================
 async function processQueue() {
-    // This function remains unchanged
     if (isProcessingQueue || publishQueue.length === 0) return;
     isProcessingQueue = true;
     log("[⚙️]", `Processing queue. Items: ${publishQueue.length}. Next post in ${PUBLISH_INTERVAL / 1000 / 60} minutes.`);
@@ -177,7 +168,6 @@ async function processQueue() {
 
 // ==================== WEBHOOK HANDLER (The Brain) ====================
 function handleProductWebhook(product) {
-    // This function remains unchanged
     if (!product || !product.status) {
         log("[⚠️]", "Received an incomplete or invalid webhook payload. Skipping.", "\x1b[33m");
         return;
@@ -210,5 +200,5 @@ function handleProductWebhook(product) {
 app.post("/webhook/product-create", (req, res) => { res.sendStatus(200); handleProductWebhook(req.body); });
 app.post("/webhook/product-update", (req, res) => { res.sendStatus(200); handleProductWebhook(req.body); });
 
-app.get("/", (_, res) => res.send(`🚀 eSelect Meta Sync v9.3 - Polling Fix Active. Queue size: ${publishQueue.length}`));
+app.get("/", (_, res) => res.send(`🚀 eSelect Meta Sync v9.4 - Recipe Fix Active. Queue size: ${publishQueue.length}`));
 app.listen(PORT, () => log("[✅]", `Server running on port ${PORT}`, "\x1b[32m"));
