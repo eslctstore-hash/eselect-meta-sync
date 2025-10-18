@@ -1,14 +1,15 @@
 // shopify.js
 const crypto = require('crypto');
+const axios = require('axios');
 const { 
     createPost, 
-    updateInstagramPostCaption // لم نعد بحاجة لدالة الإخفاء
+    updateInstagramPostCaption,
+    readDb
 } = require('./meta');
-const axios = require('axios');
-const { readDb } = require('./meta');
 
 const getShopifyProductById = async (productId) => {
     const url = `https://${process.env.SHOPIFY_SHOP_URL}/admin/api/2024-04/products/${productId}.json`;
+    console.log(`Fetching full details for product ID: ${productId}`);
     try {
         const response = await axios.get(url, {
             headers: { 'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN },
@@ -35,6 +36,7 @@ const productCreateWebhookHandler = async (req, res) => {
     const partialProduct = JSON.parse(req.body.toString());
     const productId = partialProduct.id;
     if (partialProduct.status !== 'active') {
+        console.log(`Product "${partialProduct.title}" is not active. Skipping.`);
         return res.status(200).send('Skipped non-active product.');
     }
     console.log(`Scheduling post for "${partialProduct.title}" (ID: ${productId}) in 2 minutes.`);
@@ -43,14 +45,13 @@ const productCreateWebhookHandler = async (req, res) => {
         if (fullProduct) {
             console.log(`Processing post for product: ${fullProduct.title}`);
             createPost(fullProduct);
+        } else {
+             console.error(`Could not retrieve full details for product ID ${productId}. Aborting post.`);
         }
     }, 2 * 60 * 1000);
     res.status(200).send('Webhook received and scheduled.');
 };
 
-// ==========================================================
-// ============== معالج تحديث المنتج (مُعدَّل) ===============
-// ==========================================================
 const productUpdateWebhookHandler = async (req, res) => {
     if (!verifyShopifyWebhook(req)) { return res.status(401).send('Unauthorized'); }
     console.log('Webhook received for PRODUCT UPDATE.');
@@ -64,7 +65,6 @@ const productUpdateWebhookHandler = async (req, res) => {
     }
 
     let statusText = '';
-    // توحيد الرسالة لحالتي draft و archived
     if (updatedProduct.status === 'archived' || updatedProduct.status === 'draft') {
         statusText = '(حالياً هذا المنتج غير متوفر مؤقتاً)\n';
     }
@@ -72,15 +72,11 @@ const productUpdateWebhookHandler = async (req, res) => {
     const productUrl = `https://${process.env.SHOPIFY_SHOP_URL}/products/${updatedProduct.handle}`;
     const newCaption = `${statusText}${updatedProduct.title}\n\n${updatedProduct.body_html.replace(/<[^>]*>/g, '').substring(0, 1500)}...\n\nاطلبه الآن:\n${productUrl}`;
     
-    // نستدعي نفس الدالة لتحديث النص في كل الحالات
     await updateInstagramPostCaption(existingPost.instagramPostId, newCaption);
 
     res.status(200).send('Webhook for update processed.');
 };
 
-// ==========================================================
-// ============== معالج حذف المنتج (مُعدَّل) =================
-// ==========================================================
 const productDeleteWebhookHandler = async (req, res) => {
     if (!verifyShopifyWebhook(req)) { return res.status(401).send('Unauthorized'); }
     console.log('Webhook received for PRODUCT DELETE.');
@@ -90,7 +86,6 @@ const productDeleteWebhookHandler = async (req, res) => {
     const existingPost = db.find(p => p.shopifyProductId === deletedProduct.id);
 
     if (existingPost && existingPost.instagramPostId) {
-        // بدلاً من الإخفاء، سنقوم بتحديث النص
         const newCaption = `${existingPost.productTitle}\n\n(عفواً هذا المنتج لم يعد متوفراً ، تجد منتجات مشابهة في حسابنا او الانتقال الى رابط المتجر www.eselect.store)`;
         await updateInstagramPostCaption(existingPost.instagramPostId, newCaption);
     }
@@ -98,13 +93,8 @@ const productDeleteWebhookHandler = async (req, res) => {
     res.status(200).send('Webhook for delete processed.');
 };
 
-const getActiveShopifyProducts = async () => {
-    // ... الكود هنا لم يتغير ...
-};
-
 module.exports = { 
     productCreateWebhookHandler, 
     productUpdateWebhookHandler, 
     productDeleteWebhookHandler,
-    getActiveShopifyProducts 
 };
