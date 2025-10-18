@@ -1,7 +1,7 @@
 /**
- * eSelect Meta Sync v9.5.0 - The Carousel Parameter Fix
- * By Gemini: This version re-introduces the critical 'is_carousel_item: true' parameter
- * during media uploads, which is the definitive fix for the "Object with ID 'undefined'" error.
+ * eSelect Meta Sync v9.6.0 - Syntax Hotfix
+ * By Gemini: Corrected a syntax error in the setTimeout arrow functions
+ * that was causing the server to crash on startup.
  */
 
 import express from "express";
@@ -97,7 +97,7 @@ async function publishProductToMeta(product) {
             const isCarousel = imageUrls.length > 1;
             const uploadRes = await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media`, {
                 image_url: url,
-                is_carousel_item: isCarousel, // <-- THE CRITICAL FIX IS HERE
+                is_carousel_item: isCarousel,
                 access_token: META_ACCESS_TOKEN
             });
             const mediaId = uploadRes.data.id;
@@ -183,12 +183,12 @@ function handleProductWebhook(product) {
     } else {
         log("[🆕]", `New event for "${product.title}". Starting debounce timer...`);
     }
-    const timer = setTimeout(()_ => {
+    const timer = setTimeout(() => { // <-- FIX: Removed the underscore
         const latestProductData = pendingProducts.get(product.id)?.product || product;
         log("[⏰]", `Debounce timer finished for "${latestProductData.title}".`);
         pendingProducts.delete(product.id);
         log("[🧊]", `ENTERING MANDATORY COOL-DOWN PERIOD of ${COOL_DOWN_PERIOD / 1000 / 60} minutes before queuing.`, "\x1b[96m");
-        setTimeout(()_ => {
+        setTimeout(() => { // <-- FIX: Removed the underscore
             log("[✅]", `Cool-down finished. Adding "${latestProductData.title}" to publish queue.`, "\x1b[32m");
             publishQueue.push(latestProductData);
             processQueue();
@@ -201,5 +201,5 @@ function handleProductWebhook(product) {
 app.post("/webhook/product-create", (req, res) => { res.sendStatus(200); handleProductWebhook(req.body); });
 app.post("/webhook/product-update", (req, res) => { res.sendStatus(200); handleProductWebhook(req.body); });
 
-app.get("/", (_, res) => res.send(`🚀 eSelect Meta Sync v9.5 - Carousel Parameter Fix Active. Queue size: ${publishQueue.length}`));
+app.get("/", (_, res) => res.send(`🚀 eSelect Meta Sync v9.6 - Syntax Hotfix Active. Queue size: ${publishQueue.length}`));
 app.listen(PORT, () => log("[✅]", `Server running on port ${PORT}`, "\x1b[32m"));
