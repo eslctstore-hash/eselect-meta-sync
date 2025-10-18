@@ -1,8 +1,7 @@
 /**
- * eSelect Meta Sync v9.4.0 - The Instagram Recipe Fix
- * By Gemini: This version corrects the publishing flow to match Instagram's strict
- * API documentation: 1. Upload & Poll, 2. Create Container, 3. Publish with Caption.
- * This is the definitive fix for the "Object with ID 'undefined'" error.
+ * eSelect Meta Sync v9.5.0 - The Carousel Parameter Fix
+ * By Gemini: This version re-introduces the critical 'is_carousel_item: true' parameter
+ * during media uploads, which is the definitive fix for the "Object with ID 'undefined'" error.
  */
 
 import express from "express";
@@ -78,7 +77,7 @@ async function generateCaption(product) {
     }
 }
 
-// ==================== CORE PUBLISHING LOGIC (REBUILT ACCORDING TO DOCS) ====================
+// ==================== CORE PUBLISHING LOGIC (DEFINITIVE FIX) ====================
 async function publishProductToMeta(product) {
     if (!product.images || product.images.length === 0) {
         log("[⚠️]", `Skipping "${product.title}" - no images found.`, "\x1b[33m");
@@ -95,8 +94,10 @@ async function publishProductToMeta(product) {
         // --- STEP 1: Upload and Poll each image ---
         log("[📤]", `Uploading and verifying ${imageUrls.length} media items...`);
         for (const [index, url] of imageUrls.entries()) {
+            const isCarousel = imageUrls.length > 1;
             const uploadRes = await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media`, {
                 image_url: url,
+                is_carousel_item: isCarousel, // <-- THE CRITICAL FIX IS HERE
                 access_token: META_ACCESS_TOKEN
             });
             const mediaId = uploadRes.data.id;
@@ -104,7 +105,7 @@ async function publishProductToMeta(product) {
 
             // --- POLLING LOGIC ---
             let isReady = false;
-            for (let i = 0; i < 20; i++) { // Max wait time ~60 seconds
+            for (let i = 0; i < 20; i++) {
                 const statusRes = await axios.get(`${META_GRAPH_URL}/${mediaId}?fields=status_code&access_token=${META_ACCESS_TOKEN}`);
                 const statusCode = statusRes.data.status_code;
                 if (statusCode === 'FINISHED') {
@@ -140,7 +141,7 @@ async function publishProductToMeta(product) {
         log("[✈️]", `Publishing final container ID: ${finalContainerId}`);
         await axios.post(`${META_GRAPH_URL}/${META_IG_ID}/media_publish`, {
             creation_id: finalContainerId,
-            caption: caption, // <-- Caption is added here, at the very end.
+            caption: caption,
             access_token: META_ACCESS_TOKEN
         });
         log("[✅]", `Successfully published "${product.title}" to Instagram!`, "\x1b[32m");
@@ -182,12 +183,12 @@ function handleProductWebhook(product) {
     } else {
         log("[🆕]", `New event for "${product.title}". Starting debounce timer...`);
     }
-    const timer = setTimeout(() => {
+    const timer = setTimeout(()_ => {
         const latestProductData = pendingProducts.get(product.id)?.product || product;
         log("[⏰]", `Debounce timer finished for "${latestProductData.title}".`);
         pendingProducts.delete(product.id);
         log("[🧊]", `ENTERING MANDATORY COOL-DOWN PERIOD of ${COOL_DOWN_PERIOD / 1000 / 60} minutes before queuing.`, "\x1b[96m");
-        setTimeout(() => {
+        setTimeout(()_ => {
             log("[✅]", `Cool-down finished. Adding "${latestProductData.title}" to publish queue.`, "\x1b[32m");
             publishQueue.push(latestProductData);
             processQueue();
@@ -200,5 +201,5 @@ function handleProductWebhook(product) {
 app.post("/webhook/product-create", (req, res) => { res.sendStatus(200); handleProductWebhook(req.body); });
 app.post("/webhook/product-update", (req, res) => { res.sendStatus(200); handleProductWebhook(req.body); });
 
-app.get("/", (_, res) => res.send(`🚀 eSelect Meta Sync v9.4 - Recipe Fix Active. Queue size: ${publishQueue.length}`));
+app.get("/", (_, res) => res.send(`🚀 eSelect Meta Sync v9.5 - Carousel Parameter Fix Active. Queue size: ${publishQueue.length}`));
 app.listen(PORT, () => log("[✅]", `Server running on port ${PORT}`, "\x1b[32m"));
