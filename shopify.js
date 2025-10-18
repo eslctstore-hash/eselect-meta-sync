@@ -1,14 +1,11 @@
-// shopify.js (Version with full product fetch)
+// shopify.js
 const crypto = require('crypto');
 const { createPost } = require('./meta');
 const axios = require('axios');
 
-// =================================================================
-// ============== NEW FUNCTION TO GET A SINGLE PRODUCT ==============
-// =================================================================
 /**
  * Fetches the complete details for a single product from Shopify.
- * @param {string} productId - The ID of the Shopify product.
+ * @param {string|number} productId - The ID of the Shopify product.
  * @returns {Promise<object|null>} - The full product object or null if not found.
  */
 const getShopifyProductById = async (productId) => {
@@ -26,11 +23,7 @@ const getShopifyProductById = async (productId) => {
         return null;
     }
 };
-// =================================================================
-// =================================================================
 
-
-// دالة للتحقق من صحة Webhook القادم من Shopify
 const verifyShopifyWebhook = (req) => {
     const hmac = req.get('X-Shopify-Hmac-Sha256');
     const body = req.body;
@@ -38,7 +31,7 @@ const verifyShopifyWebhook = (req) => {
     if (!hmac || !body || !secret) return false;
 
     const hash = crypto
-        .createHmac('sha256', secret)
+        .createHmac('sha265', secret)
         .update(body, 'utf8', 'hex')
         .digest('base64');
     
@@ -47,7 +40,7 @@ const verifyShopifyWebhook = (req) => {
 
 const productCreateWebhookHandler = async (req, res) => {
     if (!verifyShopifyWebhook(req)) {
-        console.warn('Webhook verification failed!');
+        console.warn('Webhook verification failed! Request might be fraudulent.');
         return res.status(401).send('Unauthorized');
     }
 
@@ -63,32 +56,22 @@ const productCreateWebhookHandler = async (req, res) => {
     
     console.log(`Scheduling post for "${partialProduct.title}" (ID: ${productId}) in 2 minutes.`);
     
-    // =================================================================
-    // ============== MODIFIED LOGIC INSIDE setTimeout ==============
-    // =================================================================
     setTimeout(async () => {
-        // 1. Fetch the FULL product details using the ID
         const fullProduct = await getShopifyProductById(productId);
 
-        // 2. Check if the fetch was successful and the product exists
         if (!fullProduct) {
             console.error(`Could not retrieve full details for product ID ${productId}. Aborting post.`);
             return;
         }
 
-        // 3. Pass the COMPLETE product object to the createPost function
         console.log(`Processing post for product: ${fullProduct.title}`);
         createPost(fullProduct);
 
     }, 2 * 60 * 1000); // 2 minutes
-    // =================================================================
-    // =================================================================
-
 
     res.status(200).send('Webhook received and scheduled.');
 };
 
-// دالة لجلب كل المنتجات الفعالة من Shopify (for daily sync)
 const getActiveShopifyProducts = async () => {
     const url = `https://${process.env.SHOPIFY_SHOP_URL}/admin/api/2024-04/products.json?status=active`;
     try {
