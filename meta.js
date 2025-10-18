@@ -6,9 +6,6 @@ const path = require('path');
 
 const DB_PATH = path.join(__dirname, 'db.json');
 
-// ==========================================================
-// ============== الدوال المفقودة - تمت إضافتها ==============
-// ==========================================================
 function readDb() {
     if (!fs.existsSync(DB_PATH)) {
         fs.writeFileSync(DB_PATH, JSON.stringify([]));
@@ -30,7 +27,6 @@ const checkContainerStatus = async (containerId, accessToken) => {
         return 'ERROR';
     }
 };
-// ==========================================================
 
 const createPost = async (product) => {
     const productUrl = `https://${process.env.SHOPIFY_SHOP_URL}/products/${product.handle}`;
@@ -70,6 +66,7 @@ const createPost = async (product) => {
 };
 
 const postToInstagram = async (imageUrls, caption) => {
+    // ... هذا القسم لم يتغير ...
     const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
     const accessToken = process.env.META_ACCESS_TOKEN;
 
@@ -96,14 +93,13 @@ const postToInstagram = async (imageUrls, caption) => {
             access_token: accessToken,
         });
         const carouselContainerId = carouselRes.data.id;
-        console.log(`Carousel container created: ${carouselContainerId}`);
-
         await waitForContainerReady(carouselContainerId, accessToken);
         return publishMedia(carouselContainerId, accessToken);
     }
 };
 
 const createSingleMediaContainer = async (imageUrl, caption, accessToken) => {
+    // ... هذا القسم لم يتغير ...
     const url = `https://graph.facebook.com/v18.0/${process.env.INSTAGRAM_ACCOUNT_ID}/media`;
     const params = { image_url: imageUrl, access_token: accessToken };
     if (caption) params.caption = caption;
@@ -112,6 +108,7 @@ const createSingleMediaContainer = async (imageUrl, caption, accessToken) => {
 };
 
 const waitForContainerReady = async (containerId, accessToken) => {
+    // ... هذا القسم لم يتغير ...
     const MAX_RETRIES = 12, RETRY_DELAY = 5000;
     for (let i = 0; i < MAX_RETRIES; i++) {
         const status = await checkContainerStatus(containerId, accessToken);
@@ -123,18 +120,23 @@ const waitForContainerReady = async (containerId, accessToken) => {
 };
 
 const publishMedia = async (containerId, accessToken) => {
+    // ... هذا القسم لم يتغير ...
     const url = `https://graph.facebook.com/v18.0/${process.env.INSTAGRAM_ACCOUNT_ID}/media_publish`;
     const response = await axios.post(url, { creation_id: containerId, access_token: accessToken });
     console.log(`Successfully published media with ID: ${response.data.id}`);
     return response.data.id;
 };
 
+// ==========================================================
+// ============== دالة تحديث النص (تم تعديلها) ================
+// ==========================================================
 const updateInstagramPostCaption = async (mediaId, newCaption) => {
     console.log(`Updating caption for media ID: ${mediaId}`);
     try {
         const url = `https://graph.facebook.com/${mediaId}`;
         await axios.post(url, {
             caption: newCaption,
+            comment_enabled: true, // <-- هذا السطر الجديد هو الحل
             access_token: process.env.META_ACCESS_TOKEN,
         });
         console.log('✅ Caption updated successfully.');
