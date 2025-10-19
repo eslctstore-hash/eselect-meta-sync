@@ -1,53 +1,56 @@
 // sync.js
 const cron = require('node-cron');
-const { getActiveShopifyProducts } = require('./shopify');
-const { createPost, updatePostStatus, readDb, writeDb } = require('./meta');
+const { getActiveShopifyProducts } = require('../shopify'); // تأكد من صحة المسار
+const { createPost, readDb } = require('./meta');
 
 const scheduleDailySync = () => {
-    // يعمل كل يوم الساعة 3 صباحاً بتوقيت مسقط
+    console.log('Daily sync is scheduled to run at 3:00 AM (Asia/Muscat).');
     cron.schedule('0 3 * * *', () => {
-        console.log('Running daily product sync...');
+        console.log('CRON JOB: Starting scheduled daily product sync...');
         syncProducts();
     }, {
         scheduled: true,
-        timezone: "Asia/Muscat" // توقيت سلطنة عمان
+        timezone: "Asia/Muscat"
     });
 };
 
 const syncProducts = async () => {
-    console.log('Fetching active products from Shopify...');
-    const shopifyProducts = await getActiveShopifyProducts();
-    const db = readDb();
-
-    const shopifyProductIds = shopifyProducts.map(p => p.id);
+    console.log('SYNC LOG: Starting product synchronization...');
     
-    // 1. نشر المنتجات الجديدة (موجودة في Shopify وغير موجودة في قاعدة بياناتنا)
+    console.log('SYNC LOG: Fetching active products from Shopify...');
+    const shopifyProducts = await getActiveShopifyProducts();
+    if (!shopifyProducts) {
+        console.error('SYNC LOG: Failed to fetch products from Shopify. Aborting sync.');
+        return;
+    }
+    console.log(`SYNC LOG: Found ${shopifyProducts.length} active products in Shopify.`);
+
+    console.log('SYNC LOG: Reading local database...');
+    const db = readDb();
+    console.log(`SYNC LOG: Found ${db.length} posted products in the local database.`);
+
+    const productsToPost = [];
     for (const product of shopifyProducts) {
         const isAlreadyPosted = db.some(p => p.shopifyProductId === product.id);
         if (!isAlreadyPosted) {
-            console.log(`Sync: Found new active product "${product.title}". Posting...`);
-            await createPost(product);
+            productsToPost.push(product);
         }
     }
 
-    // 2. تحديث حالة المنتجات القديمة
-    let updatedDb = db.map(dbEntry => {
-        const isProductStillActive = shopifyProductIds.includes(dbEntry.shopifyProductId);
-        
-        if (!isProductStillActive && dbEntry.status === 'active') {
-            console.log(`Sync: Product ${dbEntry.shopifyProductId} is no longer active. Disabling post...`);
-            updatePostStatus(dbEntry.instagramPostId, false); // تعطيل المنشور
-            dbEntry.status = 'inactive';
-        } else if (isProductStillActive && dbEntry.status === 'inactive') {
-            console.log(`Sync: Product ${dbEntry.shopifyProductId} is active again. Enabling post...`);
-            updatePostStatus(dbEntry.instagramPostId, true); // إعادة تفعيل المنشور
-            dbEntry.status = 'active';
+    if (productsToPost.length === 0) {
+        console.log('SYNC LOG: All active products are already posted. No new products to sync.');
+    } else {
+        console.log(`SYNC LOG: Found ${productsToPost.length} new products to post.`);
+        for (const product of productsToPost) {
+            console.log(`SYNC LOG: Now posting product -> "${product.title}" (ID: ${product.id})`);
+            await createPost(product);
+            // إضافة تأخير بسيط بين كل منشور لتجنب تجاوز الحدود بسرعة
+            await new Promise(resolve => setTimeout(resolve, 15000)); // 15 ثانية تأخير
         }
-        return dbEntry;
-    });
+    }
 
-    writeDb(updatedDb);
-    console.log('Daily sync completed.');
+    console.log('SYNC LOG: Synchronization process finished.');
 };
 
-module.exports = { scheduleDailySync };
+// لا تنس تصدير الدالة الجديدة
+module.exports = { scheduleDailySync, syncProducts };
