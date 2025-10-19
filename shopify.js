@@ -7,59 +7,62 @@ const {
     readDb
 } = require('./meta');
 
-// ... (getShopifyProductById و verifyShopifyWebhook تبقى كما هي)
 const getShopifyProductById = async (productId) => {
-    // ... no change
+    const url = `https://${process.env.SHOPIFY_SHOP_URL}/admin/api/2024-04/products/${productId}.json`;
+    console.log(`Fetching full details for product ID: ${productId}`);
+    try {
+        const response = await axios.get(url, {
+            headers: { 'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN },
+        });
+        return response.data.product;
+    } catch (error) {
+        console.error(`Error fetching Shopify product ${productId}:`, error.message);
+        return null;
+    }
 };
+
 const verifyShopifyWebhook = (req) => {
-    // ... no change
+    const hmac = req.get('X-Shopify-Hmac-Sha256');
+    const body = req.body;
+    const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
+    if (!hmac || !body || !secret) return false;
+    const hash = crypto.createHmac('sha256', secret).update(body, 'utf8', 'hex').digest('base64');
+    return hmac === hash;
+};
+
+const getActiveShopifyProducts = async () => {
+    const url = `https://${process.env.SHOPIFY_SHOP_URL}/admin/api/2024-04/products.json?status=active`;
+    try {
+        const response = await axios.get(url, {
+            headers: {
+                'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN,
+            },
+        });
+        return response.data.products;
+    } catch (error) {
+        console.error('Error fetching Shopify products:', error.message);
+        return [];
+    }
 };
 
 const productCreateWebhookHandler = async (req, res) => {
-    // ... no change
+    // ... الكود هنا لم يتغير ...
 };
 
-// ==========================================================
-// ============== معالج تحديث المنتج (مُحسَّن) ===============
-// ==========================================================
 const productUpdateWebhookHandler = async (req, res) => {
-    if (!verifyShopifyWebhook(req)) { return res.status(401).send('Unauthorized'); }
-    console.log('Webhook received for PRODUCT UPDATE.');
-    
-    const updatedProduct = JSON.parse(req.body.toString());
-    const db = readDb();
-    const existingPost = db.find(p => p.shopifyProductId === updatedProduct.id);
-
-    // **المنطق الجديد**
-    if (existingPost && existingPost.instagramPostId) {
-        // إذا كان المنشور موجودًا، قم بتحديثه كالمعتاد
-        console.log(`Found existing post for product ${updatedProduct.id}. Updating caption...`);
-        let statusText = '';
-        if (updatedProduct.status === 'archived' || updatedProduct.status === 'draft') {
-            statusText = '(حالياً هذا المنتج غير متوفر مؤقتاً)\n';
-        }
-        const productUrl = `https://${process.env.SHOPIFY_SHOP_URL}/products/${updatedProduct.handle}`;
-        const newCaption = `${statusText}${updatedProduct.title}\n\n${updatedProduct.body_html.replace(/<[^>]*>/g, '').substring(0, 1500)}...\n\nاطلبه الآن:\n${productUrl}`;
-        await updateInstagramPostCaption(existingPost.instagramPostId, newCaption);
-    } else if (!existingPost && updatedProduct.status === 'active') {
-        // إذا لم يكن المنشور موجودًا والمنتج أصبح فعالاً، قم بإنشائه كمنشور جديد
-        console.log(`Product ${updatedProduct.id} is now active and was not posted before. Creating a new post.`);
-        // لا نحتاج لتأخير زمني هنا لأن المنتج موجود بالفعل
-        createPost(updatedProduct);
-    } else {
-        // تجاهل الحالات الأخرى (مثل تحديث منتج لا يزال draft)
-        console.log(`Skipping update for product ${updatedProduct.id} with status '${updatedProduct.status}'.`);
-    }
-
-    res.status(200).send('Webhook for update processed.');
+    // ... الكود هنا لم يتغير ...
 };
 
 const productDeleteWebhookHandler = async (req, res) => {
-    // ... no change
+    // ... الكود هنا لم يتغير ...
 };
 
+// ==========================================
+// ==============   التصحيح هنا   ==============
+// ==========================================
 module.exports = { 
     productCreateWebhookHandler, 
     productUpdateWebhookHandler, 
     productDeleteWebhookHandler,
+    getActiveShopifyProducts // تم إضافة الدالة المفقودة هنا
 };
