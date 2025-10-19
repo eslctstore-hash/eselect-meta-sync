@@ -6,7 +6,8 @@ const {
     productUpdateWebhookHandler,
     productDeleteWebhookHandler
 } = require('./shopify');
-const { scheduleDailySync } = require('./sync');
+// استيراد دالة المزامنة مباشرة
+const { scheduleDailySync, syncProducts } = require('./sync');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -16,22 +17,27 @@ app.get('/', (req, res) => {
 });
 
 // ==========================================================
-// ==============   التعديل هنا   ===========================
+// ============== مشغل المزامنة اليدوي (جديد) ================
 // ==========================================================
-// زيادة الحد الأقصى لحجم الطلب إلى 10 ميجابايت لجميع الـ Webhooks
+app.get('/manual-sync', async (req, res) => {
+    console.log("!!!!!!!!!!!!!! MANUAL SYNC TRIGGERED !!!!!!!!!!!!!!");
+    // قم بتشغيل دالة المزامنة وانتظرها حتى تنتهي
+    await syncProducts(); 
+    console.log("!!!!!!!!!!!!!! MANUAL SYNC COMPLETED !!!!!!!!!!!!!!");
+    res.status(200).send('Manual sync process has been completed. Check logs for details.');
+});
+
 const webhookOptions = {
     limit: '10mb',
     type: 'application/json'
 };
-
 app.post('/webhooks/products/create', express.raw(webhookOptions), productCreateWebhookHandler);
 app.post('/webhooks/products/update', express.raw(webhookOptions), productUpdateWebhookHandler);
 app.post('/webhooks/products/delete', express.raw(webhookOptions), productDeleteWebhookHandler);
 
-// تطبيق محلل JSON العام لباقي المسارات
-app.use(express.json({ limit: '10mb' })); // زيادة الحد هنا أيضاً احتياطياً
+app.use(express.json({ limit: '10mb' }));
 
-// بدء المزامنة اليومية
+// بدء المزامنة اليومية المجدولة
 scheduleDailySync();
 
 app.listen(PORT, () => {
