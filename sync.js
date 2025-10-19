@@ -1,6 +1,9 @@
 // sync.js
 const cron = require('node-cron');
-const { getActiveShopifyProducts } = require('../shopify'); // تأكد من صحة المسار
+// ==========================================
+// ==============   التصحيح هنا   ==============
+// ==========================================
+const { getActiveShopifyProducts } = require('./shopify'); // تم تصحيح المسار من '../' إلى './'
 const { createPost, readDb } = require('./meta');
 
 const scheduleDailySync = () => {
@@ -44,7 +47,6 @@ const syncProducts = async () => {
         for (const product of productsToPost) {
             console.log(`SYNC LOG: Now posting product -> "${product.title}" (ID: ${product.id})`);
             await createPost(product);
-            // إضافة تأخير بسيط بين كل منشور لتجنب تجاوز الحدود بسرعة
             await new Promise(resolve => setTimeout(resolve, 15000)); // 15 ثانية تأخير
         }
     }
@@ -52,5 +54,4 @@ const syncProducts = async () => {
     console.log('SYNC LOG: Synchronization process finished.');
 };
 
-// لا تنس تصدير الدالة الجديدة
 module.exports = { scheduleDailySync, syncProducts };
