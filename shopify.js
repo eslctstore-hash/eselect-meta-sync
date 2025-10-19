@@ -7,62 +7,69 @@ const {
     readDb
 } = require('./meta');
 
-const getShopifyProductById = async (productId) => {
-    const url = `https://${process.env.SHOPIFY_SHOP_URL}/admin/api/2024-04/products/${productId}.json`;
-    console.log(`Fetching full details for product ID: ${productId}`);
-    try {
-        const response = await axios.get(url, {
-            headers: { 'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN },
-        });
-        return response.data.product;
-    } catch (error) {
-        console.error(`Error fetching Shopify product ${productId}:`, error.message);
-        return null;
-    }
-};
+// ... (getShopifyProductById, verifyShopifyWebhook, getActiveShopifyProducts لم تتغير)
+const getShopifyProductById = async (productId) => { /* ... no change ... */ };
+const verifyShopifyWebhook = (req) => { /* ... no change ... */ };
+const getActiveShopifyProducts = async () => { /* ... no change ... */ };
 
-const verifyShopifyWebhook = (req) => {
-    const hmac = req.get('X-Shopify-Hmac-Sha256');
-    const body = req.body;
-    const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
-    if (!hmac || !body || !secret) return false;
-    const hash = crypto.createHmac('sha256', secret).update(body, 'utf8', 'hex').digest('base64');
-    return hmac === hash;
-};
-
-const getActiveShopifyProducts = async () => {
-    const url = `https://${process.env.SHOPIFY_SHOP_URL}/admin/api/2024-04/products.json?status=active`;
-    try {
-        const response = await axios.get(url, {
-            headers: {
-                'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN,
-            },
-        });
-        return response.data.products;
-    } catch (error) {
-        console.error('Error fetching Shopify products:', error.message);
-        return [];
-    }
-};
 
 const productCreateWebhookHandler = async (req, res) => {
-    // ... الكود هنا لم يتغير ...
+    if (!verifyShopifyWebhook(req)) { return res.status(401).send('Unauthorized'); }
+    console.log('Webhook received for PRODUCT CREATE.');
+    const partialProduct = JSON.parse(req.body.toString());
+    const productId = partialProduct.id;
+    if (partialProduct.status !== 'active') {
+        return res.status(200).send('Skipped non-active product.');
+    }
+    console.log(`Scheduling post for "${partialProduct.title}" (ID: ${productId}) in 2 minutes.`);
+    setTimeout(async () => {
+        const fullProduct = await getShopifyProductById(productId);
+        if (fullProduct) {
+            console.log(`Processing post for product: ${fullProduct.title}`);
+            await createPost(fullProduct); // أضفنا await هنا احتياطياً لضمان التسلسل
+        }
+    }, 2 * 60 * 1000);
+    res.status(200).send('Webhook received and scheduled.');
 };
 
+// ==========================================================
+// ============== معالج تحديث المنتج (مُحسَّن) ===============
+// ==========================================================
 const productUpdateWebhookHandler = async (req, res) => {
-    // ... الكود هنا لم يتغير ...
+    if (!verifyShopifyWebhook(req)) { return res.status(401).send('Unauthorized'); }
+    console.log('Webhook received for PRODUCT UPDATE.');
+    
+    const updatedProduct = JSON.parse(req.body.toString());
+    const db = readDb();
+    const existingPost = db.find(p => p.shopifyProductId === updatedProduct.id);
+
+    if (existingPost && existingPost.instagramPostId) {
+        console.log(`Found existing post for product ${updatedProduct.id}. Updating caption...`);
+        let statusText = '';
+        if (updatedProduct.status === 'archived' || updatedProduct.status === 'draft') {
+            statusText = '(حالياً هذا المنتج غير متوفر مؤقتاً)\n';
+        }
+        const productUrl = `https://${process.env.SHOPIFY_SHOP_URL}/products/${updatedProduct.handle}`;
+        const newCaption = `${statusText}${updatedProduct.title}\n\n${updatedProduct.body_html.replace(/<[^>]*>/g, '').substring(0, 1500)}...\n\nاطلبه الآن:\n${productUrl}`;
+        await updateInstagramPostCaption(existingPost.instagramPostId, newCaption);
+    } else if (!existingPost && updatedProduct.status === 'active') {
+        console.log(`Product ${updatedProduct.id} is now active and was not posted before. Creating a new post.`);
+        // **تمت إضافة await هنا لإصلاح الخلل البرمجي**
+        await createPost(updatedProduct);
+    } else {
+        console.log(`Skipping update for product ${updatedProduct.id} with status '${updatedProduct.status}'.`);
+    }
+
+    res.status(200).send('Webhook for update processed.');
 };
 
 const productDeleteWebhookHandler = async (req, res) => {
-    // ... الكود هنا لم يتغير ...
+    // ... no change ...
 };
 
-// ==========================================
-// ==============   التصحيح هنا   ==============
-// ==========================================
-module.exports = { 
+module.deports = { 
     productCreateWebhookHandler, 
     productUpdateWebhookHandler, 
     productDeleteWebhookHandler,
-    getActiveShopifyProducts // تم إضافة الدالة المفقودة هنا
+    getActiveShopifyProducts 
 };
