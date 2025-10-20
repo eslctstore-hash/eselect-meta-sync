@@ -5,67 +5,57 @@ const {
     createPost, 
     updateInstagramPostCaption,
     readDb,
-    writeDb // استيراد دالة الكتابة
+    writeDb
 } = require('./meta');
 
-// ... (getShopifyProductById, verifyShopifyWebhook, getActiveShopifyProducts لم تتغير)
 const getShopifyProductById = async (productId) => { /* ... no change ... */ };
 const verifyShopifyWebhook = (req) => { /* ... no change ... */ };
-const getActiveShopifyProducts = async () => { /* ... no change ... */ };
 
 // ==========================================================
-// ============== معالج إنشاء المنتج (مُعاد كتابته) ============
+// ============== دالة جلب المنتجات (مُحسَّنة) ===============
 // ==========================================================
-const productCreateWebhookHandler = async (req, res) => {
-    if (!verifyShopifyWebhook(req)) { return res.status(401).send('Unauthorized'); }
-    console.log('Webhook received for PRODUCT CREATE.');
-    
-    const partialProduct = JSON.parse(req.body.toString());
-    const productId = partialProduct.id;
-    const db = readDb();
+const getActiveShopifyProducts = async () => {
+    let allProducts = [];
+    let url = `https://${process.env.SHOPIFY_SHOP_URL}/admin/api/2024-04/products.json?status=active&limit=250`;
 
-    // الخطوة 1: التحقق إذا كان المنتج مسجلاً بالفعل (سواء pending أو active)
-    const existingEntry = db.find(p => p.shopifyProductId === productId);
-    if (existingEntry) {
-        console.log(`Duplicate webhook for product ${productId}. Ignoring.`);
-        return res.status(200).send('Duplicate webhook ignored.');
-    }
+    try {
+        while (url) {
+            const response = await axios.get(url, {
+                headers: {
+                    'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN,
+                },
+            });
+            
+            allProducts = allProducts.concat(response.data.products);
 
-    if (partialProduct.status !== 'active') {
-        return res.status(200).send('Skipped non-active product.');
-    }
-
-    // الخطوة 2: "قفل" المنتج فورًا بتسجيله كـ "pending"
-    console.log(`Locking product ${productId} as 'pending' before scheduling.`);
-    db.push({
-        shopifyProductId: productId,
-        instagramPostId: null,
-        productTitle: partialProduct.title,
-        status: 'pending' // حالة مؤقتة
-    });
-    writeDb(db);
-
-    // الخطوة 3: جدولة النشر
-    console.log(`Scheduling post for "${partialProduct.title}" (ID: ${productId}) in 2 minutes.`);
-    setTimeout(async () => {
-        const fullProduct = await getShopifyProductById(productId);
-        if (fullProduct) {
-            console.log(`Processing post for product: ${fullProduct.title}`);
-            await createPost(fullProduct); // createPost ستقوم بتحديث الحالة إلى 'active'
+            const linkHeader = response.headers.link;
+            url = null;
+            if (linkHeader) {
+                const links = linkHeader.split(',');
+                const nextLink = links.find(link => link.includes('rel="next"'));
+                if (nextLink) {
+                    url = nextLink.substring(nextLink.indexOf('<') + 1, nextLink.indexOf('>'));
+                }
+            }
         }
-    }, 2 * 60 * 1000);
-
-    res.status(200).send('Webhook received, locked, and scheduled.');
+        return allProducts;
+    } catch (error) {
+        // **هذا هو التعديل المهم**
+        console.error('❌ Error fetching Shopify products with pagination.');
+        if (error.response) {
+            // إذا كان الخطأ من API Shopify، اطبع التفاصيل
+            console.error('Error Details from Shopify API:', JSON.stringify(error.response.data, null, 2));
+        } else {
+            // وإلا، اطبع الخطأ العام
+            console.error('General Error:', error.message);
+        }
+        return null; // إرجاع null للإشارة إلى فشل العملية
+    }
 };
 
-
-const productUpdateWebhookHandler = async (req, res) => {
-    // ... no change ...
-};
-
-const productDeleteWebhookHandler = async (req, res) => {
-    // ... no change ...
-};
+const productCreateWebhookHandler = async (req, res) => { /* ... no change ... */ };
+const productUpdateWebhookHandler = async (req, res) => { /* ... no change ... */ };
+const productDeleteWebhookHandler = async (req, res) => { /* ... no change ... */ };
 
 module.exports = { 
     productCreateWebhookHandler, 
